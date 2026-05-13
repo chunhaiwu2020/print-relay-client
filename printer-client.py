@@ -415,6 +415,8 @@ class App:
         btn_row.pack(fill=t.X)
         self.scan_btn = tt.Button(btn_row, text="重新扫描打印机", command=self._scan_and_show)
         self.scan_btn.pack(side=t.LEFT)
+        self.tpl_btn = tt.Button(btn_row, text="编辑模板", command=self._edit_template)
+        self.tpl_btn.pack(side=t.LEFT, padx=(8,0))
 
         self.printer_lbl = tt.Label(pf, text="尚未扫描", foreground='#999', font=('Microsoft YaHei', 9))
         self.printer_lbl.pack(pady=(6,0))
@@ -494,6 +496,12 @@ class App:
             self._log("配对码已复制！")
         else:
             self._log(f"复制失败，请手动复制: {token}")
+
+    def _edit_template(self):
+        """用记事本打开模板文件"""
+        get_template()  # 确保存在
+        os.startfile(str(TEMPLATE_FILE))
+        self._log(f"已打开模板: {TEMPLATE_FILE}")
 
     def _close(self):
         self.client.stop()
