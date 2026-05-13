@@ -574,6 +574,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         if r.get('woo_token') == token:
                             matched.append(r)
                 if not matched:
+                    log.warning(f"POST /wc: token={token} but no routes found")
                     self.send_error(503, 'No route configured'); return
 
                 results = []
@@ -604,6 +605,28 @@ class WebhookHandler(BaseHTTPRequestHandler):
                                 "items": len(order.get('line_items', []))
                             })
                             if len(state.history) > 50: state.history.pop()
+
+            else:
+                # 指定目标客户端（面板测试打印）
+                async def _w():
+                    async with async_lock:
+                        c = clients.get(target_client)
+                        return c.get('width_mm', 80) if c else 80
+                w = run_async(_w()) or 80
+                ticket = build_ticket(body, w)
+                if target_printer:
+                    ticket = f"PRINTER:{target_printer}\n".encode() + ticket
+                ok = run_async(send_to_client(target_client, ticket))
+                results = [{'client': target_client, 'printer': target_printer, 'ok': ok}]
+                if ok:
+                    with state.lock:
+                        state.history.insert(0, {
+                            "time": datetime.now(timezone.utc).isoformat(),
+                            "client": target_client, "printer": target_printer or "default",
+                            "order": str(body.get('number', 'TEST')),
+                            "items": len(body.get('line_items', []))
+                        })
+                        if len(state.history) > 50: state.history.pop()
 
                 with state.lock: state.save()
                 self._json({'status': 'ok', 'results': results}); return
