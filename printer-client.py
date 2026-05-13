@@ -490,6 +490,7 @@ class Client:
 
 # ── GUI ──────────────────────────────────────────────────────
 # 托盘图标 (ctypes, 纯 stdlib)
+# 用窗口过程钩子直接捕获托盘消息 — 比 PeekMessage 轮询可靠，不会被 tkinter 主循环吃掉
 import ctypes as _ct
 from ctypes import wintypes as _w
 
@@ -497,18 +498,61 @@ _NIM_ADD, _NIM_DELETE, _NIM_MODIFY = 0, 2, 1
 _NIF_MESSAGE, _NIF_ICON, _NIF_TIP = 1, 2, 4
 _WM_TRAY = 0x8000 + 1
 
+# 窗口过程钩子 — 全局回调（同一个进程只有这一个托盘）
+_WNDPROC_TYPE = _ct.WINFUNCTYPE(_ct.c_void_p, _w.HWND, _ct.c_uint, _w.WPARAM, _w.LPARAM)
+_orig_wndproc = None
+_tray_menu_handler = None
+_tray_dblclick_handler = None
+
+def _tray_wndproc(hwnd, msg, wparam, lparam):
+    """窗口过程钩子：截获托盘消息"""
+    if msg == _WM_TRAY:
+        if lparam == 0x0205:  # WM_RBUTTONUP → 右键菜单
+            if _tray_menu_handler:
+                _tray_menu_handler()
+        elif lparam == 0x0202:  # WM_LBUTTONDBLCLK → 双击还原
+            if _tray_dblclick_handler:
+                _tray_dblclick_handler()
+        return 0
+    # 其他消息交给原窗口过程
+    return _ct.windll.user32.CallWindowProcA(_orig_wndproc, hwnd, msg, wparam, lparam)
+
 class _NOTIFYICONDATA(_ct.Structure):
     _fields_ = [("cbSize", _w.DWORD), ("hWnd", _w.HWND), ("uID", _w.UINT),
                 ("uFlags", _w.UINT), ("uCallbackMessage", _w.UINT),
                 ("hIcon", _w.HICON), ("szTip", _w.CHAR * 128)]
 
-def _tray_add(hwnd, tip="Print Relay"):
+def _get_printer_icon():
+    """获取系统打印机图标 (SHGetStockIconInfo, Vista+)"""
+    SHGSI_ICON = 0x100
+    SIID_PRINTER = 16
+    
+    class _SHSTOCKICONINFO(_ct.Structure):
+        _fields_ = [("cbSize", _w.DWORD), ("hIcon", _w.HICON),
+                    ("iSysImageIndex", _ct.c_int), ("iIcon", _ct.c_int),
+                    ("szPath", _w.CHAR * 260)]
+    
+    sii = _SHSTOCKICONINFO()
+    sii.cbSize = _ct.sizeof(sii)
+    _ct.windll.shell32.SHGetStockIconInfo(SIID_PRINTER, SHGSI_ICON, _ct.byref(sii))
+    return sii.hIcon
+
+def _tray_add(hwnd, hicon, tip="Print Relay"):
+    """添加托盘图标（打印机图标 + 窗口过程钩子）"""
+    global _orig_wndproc
+    # 安装窗口过程钩子 — 比 PeekMessage 轮询可靠
+    GWL_WNDPROC = -4
+    _orig_wndproc = _ct.windll.user32.SetWindowLongPtrA(
+        hwnd, GWL_WNDPROC,
+        _ct.cast(_WNDPROC_TYPE(_tray_wndproc), _ct.c_void_p).value)
+    
     nid = _NOTIFYICONDATA()
     nid.cbSize = _ct.sizeof(nid)
     nid.hWnd = hwnd
     nid.uID = 1
-    nid.uFlags = _NIF_MESSAGE | _NIF_TIP
+    nid.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP   # ← 必须有 NIF_ICON + hIcon
     nid.uCallbackMessage = _WM_TRAY
+    nid.hIcon = hicon
     nid.szTip = tip.encode('utf-8')[:127]
     return _ct.windll.shell32.Shell_NotifyIconA(_NIM_ADD, _ct.byref(nid))
 
@@ -533,7 +577,7 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
         # 托盘图标
-        self._tray_menu = None
+        self._hicon = None
         self.root.after(500, self._init_tray)
 
         # 开机启动参数
@@ -682,6 +726,9 @@ class App:
     def _quit(self):
         """彻底退出"""
         _tray_del(int(self.root.frame(), 16))
+        if self._hicon:
+            try: _ct.windll.user32.DestroyIcon(self._hicon)
+            except: pass
         self.client.stop()
         self.root.destroy()
 
@@ -690,27 +737,28 @@ class App:
         self.root.lift()
 
     def _init_tray(self):
-        """创建托盘图标"""
+        """创建托盘图标（系统打印机图标 + 窗口过程钩子）"""
+        global _tray_menu_handler, _tray_dblclick_handler
         try:
             hwnd = int(self.root.frame(), 16)
         except:
             self.root.after(1000, self._init_tray); return
-        _tray_add(hwnd, "Print Relay")
-        self.root.bind('<<TrayCallback>>', self._on_tray)
-        self._poll_tray()
 
-    def _poll_tray(self):
-        msg = _w.MSG()
-        while _ct.windll.user32.PeekMessageA(_ct.byref(msg), 0, _WM_TRAY, _WM_TRAY, 1):
-            self.root.event_generate('<<TrayCallback>>', data=str(msg.lParam))
-        self.root.after(200, self._poll_tray)
+        self._hicon = _get_printer_icon()
 
-    def _on_tray(self, event):
-        data = int(event.data) if hasattr(event, 'data') else 0
-        if data == 0x0202:  # 双击
-            self._show()
-        elif data == 0x0205:  # 右键
-            self._show_tray_menu()
+        # 设置托盘回调
+        _tray_menu_handler = self._show_tray_menu
+        _tray_dblclick_handler = self._show
+
+        _tray_add(hwnd, self._hicon, "Print Relay")
+
+        # 设置窗口图标（标题栏 + 任务栏）— 同一打印机图标
+        WM_SETICON = 0x0080
+        ICON_SMALL, ICON_BIG = 0, 1
+        _ct.windll.user32.SendMessageA(hwnd, WM_SETICON, ICON_SMALL, self._hicon)
+        _ct.windll.user32.SendMessageA(hwnd, WM_SETICON, ICON_BIG, self._hicon)
+
+        self._log("托盘图标已创建")
 
     def _show_tray_menu(self):
         m = self.tk.Menu(self.root, tearoff=0)
