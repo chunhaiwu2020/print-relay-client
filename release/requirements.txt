@@ -1,0 +1,11 @@
+# Print Relay — 构建依赖
+
+# Windows 客户端
+# 安装: pip install -r requirements.txt
+# 打包: python build.py
+
+pywin32>=306          # 打印机列表 + 原生打印
+pyinstaller>=6.0      # 打包 EXE
+
+# VPS 服务端 (纯 stdlib，零依赖)
+# relay-server.py 只需要 Python 3.8+
