@@ -186,8 +186,12 @@ def render_ticket(template_str, order, width=80):
                 out += escpos_cut(); parts = []; break
             elif cmd == '.item':
                 rest = parts[1] if len(parts) > 1 else ''
-                toks = rest.split(' ', 2)
-                qty, name, prc = (toks + ['', '', ''])[:3]
+                # rsplit: 最后一段是价格，第一段是数量，中间全是菜名
+                toks = rest.rsplit(' ', 1)
+                prc = toks[1] if len(toks) > 1 else '0'
+                front = toks[0].split(' ', 1)
+                qty = front[0]
+                name = front[1] if len(front) > 1 else ''
                 lt = int(qty or 1) * float(prc or 0)
                 left = f"{qty}x  {name}"[:30]
                 right = f"€{lt:,.2f}".replace('.', ',')
