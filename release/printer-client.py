@@ -14,7 +14,11 @@ from jinja2 import Template
 RELAY_HOST = "relay.thecarte.eu"
 RELAY_PORT = 51900
 PAPER_WIDTH = 80
-TEMPLATE_FILE = (Path(getattr(sys, '_MEIPASS', Path(__file__).parent)) / "ticket.j2")  # 默认模板
+
+# 模板查找优先级: EXE 旁边的 ticket.j2 > 内置的
+_EXE_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
+_BUNDLED = Path(getattr(sys, '_MEIPASS', _EXE_DIR)) / "ticket.j2"
+TEMPLATE_FILE = _EXE_DIR / "ticket.j2" if (_EXE_DIR / "ticket.j2").exists() else _BUNDLED
 
 # ── 配置 ─────────────────────────────────────────────────────
 CONFIG_DIR = Path(os.getenv('APPDATA', os.path.expanduser('~'))) / 'PrintRelay'
