@@ -261,6 +261,11 @@ class Client:
         sock.settimeout(10)
         sock.connect((RELAY_HOST, RELAY_PORT))
 
+        # TCP keepalive — 防 NAT 空闲超时断连
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except: pass
+
         # REGISTER
         sock.sendall(f"REGISTER {self.token}\n".encode())
 
@@ -308,6 +313,7 @@ class Client:
                     hdr = self._recv(sock, 4)
                     if not hdr: break
                     length = struct.unpack('>I', hdr)[0]
+                    if length == 0: continue   # 心跳包，跳过
                     if length > 512*1024: break
                     data = self._recv(sock, length)
                     if not data: break

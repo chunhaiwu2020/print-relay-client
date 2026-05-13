@@ -138,6 +138,23 @@ async def handle_client(reader, writer):
             }
         log.info(f"客户端上线: {client_name} | 打印机: {printers} | {width_mm}mm")
 
+        # TCP keepalive — 防 NAT 空闲超时断连
+        try:
+            sock = writer.get_extra_info('socket')
+            if sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except: pass
+
+        # 心跳任务：每 15 秒发 4 字节零值保活（客户端跳过）
+        async def heartbeat():
+            while True:
+                await asyncio.sleep(15)
+                try:
+                    writer.write(b'\x00\x00\x00\x00')
+                    await writer.drain()
+                except: break
+        hb_task = asyncio.create_task(heartbeat())
+
         # Read loop — 处理打印机更新
         try:
             while True:
@@ -160,6 +177,7 @@ async def handle_client(reader, writer):
                         pass
         except asyncio.CancelledError: pass
         finally:
+            hb_task.cancel()
             async with async_lock:
                 clients.pop(client_name, None)
             log.info(f"客户端断开: {client_name}")
