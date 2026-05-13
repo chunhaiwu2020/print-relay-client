@@ -12,7 +12,6 @@ cmd = [
     sys.executable, '-m', 'PyInstaller',
     '--onefile', '--name', 'PrintRelay-Client',
     '--icon', 'icon.ico',
-    '--add-data', 'ticket.j2;.',
     '--collect-all', 'pywin32',
     '--collect-all', 'win32print',
     '--collect-all', 'win32api',

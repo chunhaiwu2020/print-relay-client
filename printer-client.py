@@ -15,10 +15,44 @@ RELAY_HOST = "relay.thecarte.eu"
 RELAY_PORT = 51900
 PAPER_WIDTH = 80
 
-# 模板查找优先级: EXE 旁边的 ticket.j2 > 内置的
+# 模板：EXE 旁边 ticket.j2，首次运行自动创建默认
 _EXE_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
-_BUNDLED = Path(getattr(sys, '_MEIPASS', _EXE_DIR)) / "ticket.j2"
-TEMPLATE_FILE = _EXE_DIR / "ticket.j2" if (_EXE_DIR / "ticket.j2").exists() else _BUNDLED
+TEMPLATE_FILE = _EXE_DIR / "ticket.j2"
+
+DEFAULT_TEMPLATE = """\
+.center.bold Restaurant Asia Shanghai
+.center thecarte.eu
+.div=
+.left Bestell-Nr: #{{ order.number }}
+.left Datum: {{ order.date_created[:19]|replace('T', ' ') }}
+{% if order.payment_method_title %}
+.left Zahlung: {{ order.payment_method_title }}
+{% endif %}
+.div-
+{% for item in order.line_items %}
+.item {{ item.quantity }} {{ item.name }} {{ "%.2f"|format(item.price|float) }}
+{% endfor %}
+.div-
+.right.bold Gesamt: €{{ "%.2f"|format(order.total|float) }}
+{% if order.shipping_total|float > 0 %}
+.right inkl. Lieferung: €{{ "%.2f"|format(order.shipping_total|float) }}
+{% endif %}
+{% if order.customer_note %}
+.div-
+.bold Hinweis:
+.left {{ order.customer_note[:40] }}
+{% endif %}
+.div=
+.center.bold Vielen Dank!
+.center {{ now.strftime('%d.%m.%Y %H:%M') }}
+.cut
+"""
+
+def get_template():
+    if not TEMPLATE_FILE.exists():
+        TEMPLATE_FILE.write_text(DEFAULT_TEMPLATE, encoding='utf-8')
+        log.info(f"已创建默认模板: {TEMPLATE_FILE}")
+    return TEMPLATE_FILE.read_text(encoding='utf-8')
 
 # ── 配置 ─────────────────────────────────────────────────────
 CONFIG_DIR = Path(os.getenv('APPDATA', os.path.expanduser('~'))) / 'PrintRelay'
@@ -290,11 +324,7 @@ class Client:
                     target_printer = msg.get('printer', '')
 
                     # 加载模板并渲染
-                    try:
-                        template_str = TEMPLATE_FILE.read_text(encoding='utf-8')
-                    except:
-                        log.error(f"无法加载模板: {TEMPLATE_FILE}")
-                        continue
+                    template_str = get_template()
 
                     ticket = render_ticket(template_str, order, PAPER_WIDTH)
 
