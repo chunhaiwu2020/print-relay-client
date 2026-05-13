@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Windows
+*.exe
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Data
+*.log
+state.json
+backup/
+
+# Docker
+*.tar
