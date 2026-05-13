@@ -9,6 +9,7 @@
 .div-
 {% for item in order.line_items %}
 .item {{ item.quantity }} {{ item.name }} {{ "%.2f"|format(item.price|float) }}
+{% if order.cut_per_item %}.cut{% endif %}
 {% endfor %}
 .div-
 .right.bold Gesamt: €{{ "%.2f"|format(order.total|float) }}

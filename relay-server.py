@@ -249,6 +249,7 @@ th{color:#888;font-weight:500;font-size:11px}
   <div class="col"><label>选择路由</label><select id="test_route"><option value="">— 请先配置路由 —</option></select></div>
   <div class="col"><label>订单号</label><input id="test_order" value="TEST-001"></div>
   <div class="col"><label>菜品（名称,单价,数量|...）</label><input id="test_items" value="Peking Suppe,3.50,2|Frühlingsrolle,4.50,1"></div>
+  <div class="col"><label>&nbsp;</label><label class="check"><input type="checkbox" id="test_cut"> 一菜一切</label></div>
   <div><label>&nbsp;</label><button class="btn primary" onclick="sendTest()">▶️ 发送测试</button></div>
 </div>
 <div id="test_msg" class="msg"></div>
@@ -308,6 +309,7 @@ async function refresh(){
  cs.value=cs_val;
 
  // 恢复打印机下拉
+ ps.innerHTML='<option value="">— 默认 —</option>';
  if(cs_val){
   let cl=clients.find(x=>x[1].name===cs_val);
   if(cl&&cl[1].printers) cl[1].printers.forEach(p=>ps.add(new Option(p,p)));
@@ -406,7 +408,9 @@ async function sendTest(){
  let items=[];
  itemsRaw.split('|').forEach(p=>{let x=p.split(',');if(x.length>=2)items.push({name:x[0].trim(),price:parseFloat(x[1]),quantity:parseInt(x[2]||1)})});
  let body=JSON.stringify({number:document.getElementById('test_order').value,date_created:new Date().toISOString(),payment_method_title:'Test',line_items:items,shipping_total:'0.00'});
- let res=await fetch('/wc?token='+(r.woo_token||''),{method:'POST',headers:{'Content-Type':'application/json','X-Print-Client':r.client,'X-Printer-Name':r.printer},body:body});
+ let hdrs={'Content-Type':'application/json','X-Print-Client':r.client,'X-Printer-Name':r.printer};
+ if(document.getElementById('test_cut').checked) hdrs['X-Cut-Per-Item']='1';
+ let res=await fetch('/wc?token='+(r.woo_token||''),{method:'POST',headers:hdrs,body:body});
  let msg=document.getElementById('test_msg');
  try{
   let j=await res.json();
@@ -515,10 +519,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
             # Find route
             target_client = self.headers.get('X-Print-Client', '')
             target_printer = self.headers.get('X-Printer-Name', '')
-            width_mm = 80
+            cut_per_item = self.headers.get('X-Cut-Per-Item', '') == '1'
 
             if not target_client:
                 order = body
+                # 透传 cut_per_item
+                if cut_per_item:
+                    order = {**order, 'cut_per_item': True}
                 # 收集所有匹配路由（一对多：订单 → 厨房 + 前台 + 吧台...）
                 matched = []
                 with state.lock:
@@ -553,7 +560,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
             else:
                 # 指定目标客户端（面板测试打印）
-                payload = json.dumps({"type": "print", "order": body, "printer": target_printer}).encode()
+                order = {**body}
+                if cut_per_item:
+                    order['cut_per_item'] = True
+                payload = json.dumps({"type": "print", "order": order, "printer": target_printer}).encode()
                 ok = run_async(send_to_client(target_client, payload))
                 results = [{'client': target_client, 'printer': target_printer, 'ok': ok}]
                 if ok:
