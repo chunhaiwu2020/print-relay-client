@@ -782,6 +782,10 @@ def main():
         _uninstall_autostart()
         print("已移除开机启动")
         return
+
+    # 单实例检查 — 不允许同时跑两个客户端
+    _check_single_instance()
+
     if '--no-gui' in sys.argv:
         c = Client(); c.start()
         print(f"配对码: {c.token}"); print("按 Ctrl+C 退出")
@@ -798,6 +802,17 @@ def main():
             print("未检测到打印机")
     else:
         App().run()
+
+def _check_single_instance():
+    """Windows 命名互斥体 — 防止同时跑多个客户端"""
+    import ctypes as _ct2
+    MUTEX_NAME = "PrintRelayClient_SingleInstance_v4"
+    _ct2.windll.kernel32.CreateMutexA(None, False, MUTEX_NAME.encode())
+    if _ct2.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        _ct2.windll.user32.MessageBoxA(0,
+            "Print Relay 已在运行中。\n请检查通知区域的图标。".encode(),
+            "Print Relay".encode(), 0x40)  # MB_ICONINFORMATION
+        sys.exit(0)
 
 def _install_autostart():
     """写入注册表 HKCU\...\Run 实现开机启动 (--startup 参数隐藏窗口)"""
