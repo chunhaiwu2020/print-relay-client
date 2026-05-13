@@ -17,17 +17,17 @@ PAPER_WIDTH = 80
 
 # 配置文件均在 EXE 目录下
 _EXE_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
-CONFIG_FILE = _EXE_DIR / "config.ini"
+INI_FILE = _EXE_DIR / "config.ini"
 TEMPLATES_DIR = _EXE_DIR / "templates"
 
 def load_config():
-    """读取 config.ini，不存在则用默认空配置"""
+    """读取 config.ini"""
     cfg = configparser.ConfigParser()
-    if CONFIG_FILE.exists():
-        cfg.read(CONFIG_FILE, encoding='utf-8')
+    if INI_FILE.exists():
+        cfg.read(INI_FILE, encoding='utf-8')
         log.info(f"已加载配置: {len(cfg.sections())} 个打印机分区")
     else:
-        log.warning(f"未找到 {CONFIG_FILE}，使用默认行为")
+        log.warning(f"未找到 {INI_FILE} — 请将 config.ini 放到 EXE 同目录")
     return cfg
 
 def find_printer_section(config, printer_name):
@@ -55,33 +55,6 @@ def load_template(config, section):
         log.error(f"无法加载模板 {p}: {e}")
         return None
 
-# 兜底模板：无 config.ini 时使用
-FALLBACK_TEMPLATE = {
-    "width": 80,
-    "header": [
-        {"type": "text", "content": "Restaurant Asia Shanghai", "align": "center", "bold": True},
-        {"type": "text", "content": "thecarte.eu", "align": "center"},
-        {"type": "divider", "char": "="},
-        {"type": "field", "key": "number", "label": "Bestell-Nr:", "format": "#{value}"},
-        {"type": "field", "key": "date_created", "label": "Datum:", "format": "{value[:16]}", "transform": "T-> "},
-        {"type": "divider", "char": "-"}
-    ],
-    "items": {
-        "type": "receipt",
-        "columns": [
-            {"key": "quantity", "width": 4},
-            {"key": "name", "width": 28},
-            {"key": "price", "format": "€{:.2f}", "width": 14, "align": "right"}
-        ]
-    },
-    "footer": [
-        {"type": "divider", "char": "-"},
-        {"type": "field", "key": "total", "label": "Gesamt:", "format": "€{value}", "align": "right", "bold": True},
-        {"type": "divider", "char": "="},
-        {"type": "text", "content": "Vielen Dank!", "align": "center", "bold": True}
-    ],
-    "cut": True
-}
 CONFIG_DIR = Path(os.getenv('APPDATA', os.path.expanduser('~'))) / 'PrintRelay'
 CONFIG_FILE = CONFIG_DIR / 'config.json'
 LOG_FILE = CONFIG_DIR / 'client.log'
@@ -446,9 +419,8 @@ class Client:
                     template = load_template(self.config, sec) if sec else None
 
                     if not template:
-                        log.warning(f"无模板匹配: {target_printer}，使用兜底模板")
-                        template = FALLBACK_TEMPLATE
-                        sec = None
+                        log.warning(f"无模板匹配: {target_printer}")
+                        continue
 
                     try:
                         ticket = render_json_template(template, order, self.config, sec)
@@ -655,9 +627,9 @@ class App:
         if TEMPLATES_DIR.exists():
             os.startfile(str(TEMPLATES_DIR))
             self._log(f"已打开模板目录: {TEMPLATES_DIR}")
-        elif CONFIG_FILE.exists():
-            os.startfile(str(CONFIG_FILE))
-            self._log(f"已打开配置: {CONFIG_FILE}")
+        elif INI_FILE.exists():
+            os.startfile(str(INI_FILE))
+            self._log(f"已打开配置: {INI_FILE}")
         else:
             self._log("未找到模板目录或配置文件")
 
