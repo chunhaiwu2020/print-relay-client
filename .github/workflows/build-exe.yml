@@ -1,0 +1,28 @@
+name: Build EXE
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: pip install pywin32 pyinstaller
+
+      - name: 编译 EXE
+        run: python build.py
+
+      - name: 上传 EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrintRelay-Client
+          path: dist/PrintRelay-Client.exe
