@@ -331,15 +331,21 @@ class Client:
                     target_printer = msg.get('printer', '')
 
                     # 加载模板并渲染
-                    template_str = get_template()
-
-                    ticket = render_ticket(template_str, order, PAPER_WIDTH)
+                    try:
+                        template_str = get_template()
+                        ticket = render_ticket(template_str, order, PAPER_WIDTH)
+                    except Exception as e:
+                        log.error(f"模板渲染失败: {e}")
+                        continue
 
                     printer = target_printer or (self.printers[0] if self.printers else None)
                     if printer:
-                        send_raw(printer, ticket)
+                        ok = send_raw(printer, ticket)
                         onum = order.get('number', '?')
-                        self._state('approved', f'打印 #{onum} ({len(ticket)}B) -> {printer}')
+                        if ok:
+                            self._state('approved', f'已打印 #{onum} ({len(ticket)}B) -> {printer}')
+                        else:
+                            self._state('error', f'打印失败 #{onum} -> {printer}，检查打印机')
                     else:
                         log.warning("无可用打印机")
                 except socket.timeout:
