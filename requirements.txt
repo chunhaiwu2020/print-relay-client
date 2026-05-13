@@ -6,7 +6,6 @@
 
 pywin32>=306          # 打印机列表 + 原生打印
 pyinstaller>=6.0      # 打包 EXE
-jinja2>=3.0           # ESC/POS 模板渲染
 
 # VPS 服务端 (纯 stdlib，零依赖)
 # relay-server.py 只需要 Python 3.8+

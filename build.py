@@ -17,7 +17,7 @@ cmd = [
     '--collect-all', 'win32api',
     '--hidden-import', 'tkinter',
     '--hidden-import', '_tkinter',
-    '--hidden-import', 'jinja2',
+    '--hidden-import', 'configparser',
     '--clean', '--noconfirm',
 ]
 if not CONSOLE:

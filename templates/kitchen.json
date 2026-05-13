@@ -1,0 +1,22 @@
+{
+  "width": 80,
+  "header": [
+    {"type": "text", "content": "=== KÜCHE ===", "align": "center", "bold": true},
+    {"type": "field", "key": "number", "label": "Bestell-Nr:", "format": "#{value}"},
+    {"type": "field", "key": "date_created", "label": "Zeit:", "format": "{value[:16]}"},
+    {"type": "divider"}
+  ],
+  "items": {
+    "type": "simple",
+    "columns": [
+      {"key": "quantity", "prefix": "", "width": 4},
+      {"key": "name", "width": 34},
+      {"key": "price", "format": "€{:.2f}", "width": 10, "hide": true}
+    ]
+  },
+  "footer": [
+    {"type": "divider"},
+    {"type": "text", "content": "Bitte zubereiten!", "align": "center", "bold": true}
+  ],
+  "cut": true
+}

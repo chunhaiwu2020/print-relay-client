@@ -1,61 +1,87 @@
 #!/usr/bin/env python3
 """
-Print Relay Client v3 — 客户端渲染版
-启动 → 显示配对码 → 扫描打印机 → 管理员在面板添加 → 自动连接
-服务器发 JSON → 客户端 Jinja2 渲染 ESC/POS → 打印机
+Print Relay Client v4 — JSON 模板版
+启动 → 读 config.ini → 扫描打印机 → 管理员在面板添加 → 自动连接
+服务器发 JSON → 客户端匹配打印机 → 读对应 JSON 模板 → ESC/POS → 打印机
+每台打印机独立模板，config.ini 配置 station_filter、cut_per_item 等。
 """
 
-import socket, struct, json, os, sys, time, threading, secrets, logging
+import socket, struct, json, os, sys, time, threading, secrets, logging, configparser
 from datetime import datetime
 from pathlib import Path
-from jinja2 import Template
 
 # ── 硬编码 ───────────────────────────────────────────────────
 RELAY_HOST = "relay.thecarte.eu"
 RELAY_PORT = 51900
 PAPER_WIDTH = 80
 
-# 模板：EXE 旁边 ticket.j2，首次运行自动创建默认
+# 配置文件均在 EXE 目录下
 _EXE_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
-TEMPLATE_FILE = _EXE_DIR / "ticket.j2"
+CONFIG_FILE = _EXE_DIR / "config.ini"
+TEMPLATES_DIR = _EXE_DIR / "templates"
 
-DEFAULT_TEMPLATE = """\
-.center.bold Restaurant Asia Shanghai
-.center thecarte.eu
-.div=
-.left Bestell-Nr: #{{ order["number"] }}
-.left Datum: {{ order["date_created"][:19]|replace('T', ' ') }}
-{% if order["payment_method_title"] %}
-.left Zahlung: {{ order["payment_method_title"] }}
-{% endif %}
-.div-
-{% for item in order["line_items"] %}
-.item {{ item["quantity"] }} {{ item["name"] }} {{ "%.2f"|format(item["price"]|float) }}
-{% if order["cut_per_item"] %}.cut{% endif %}
-{% endfor %}
-.div-
-.right.bold Gesamt: €{{ "%.2f"|format(order["total"]|float) }}
-{% if order["shipping_total"]|float > 0 %}
-.right inkl. Lieferung: €{{ "%.2f"|format(order["shipping_total"]|float) }}
-{% endif %}
-{% if order["customer_note"] %}
-.div-
-.bold Hinweis:
-.left {{ order["customer_note"][:40] }}
-{% endif %}
-.div=
-.center.bold Vielen Dank!
-.center {{ now.strftime('%d.%m.%Y %H:%M') }}
-.cut
-"""
+def load_config():
+    """读取 config.ini，不存在则用默认空配置"""
+    cfg = configparser.ConfigParser()
+    if CONFIG_FILE.exists():
+        cfg.read(CONFIG_FILE, encoding='utf-8')
+        log.info(f"已加载配置: {len(cfg.sections())} 个打印机分区")
+    else:
+        log.warning(f"未找到 {CONFIG_FILE}，使用默认行为")
+    return cfg
 
-def get_template():
-    if not TEMPLATE_FILE.exists():
-        TEMPLATE_FILE.write_text(DEFAULT_TEMPLATE, encoding='utf-8')
-        log.info(f"已创建默认模板: {TEMPLATE_FILE}")
-    return TEMPLATE_FILE.read_text(encoding='utf-8')
+def find_printer_section(config, printer_name):
+    """根据打印机名匹配 [printer.*] 分区"""
+    for section in config.sections():
+        if section.startswith('printer.'):
+            name = config.get(section, 'name', fallback='')
+            if name == printer_name:
+                return section
+    return None
 
-# ── 配置 ─────────────────────────────────────────────────────
+def load_template(config, section):
+    """读取该分区的 JSON 模板"""
+    tpl_path = config.get(section, 'template', fallback=None)
+    if not tpl_path:
+        return None
+    # 支持相对路径（相对于 EXE 目录）
+    p = Path(tpl_path)
+    if not p.is_absolute():
+        p = _EXE_DIR / p
+    try:
+        with open(p, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        log.error(f"无法加载模板 {p}: {e}")
+        return None
+
+# 兜底模板：无 config.ini 时使用
+FALLBACK_TEMPLATE = {
+    "width": 80,
+    "header": [
+        {"type": "text", "content": "Restaurant Asia Shanghai", "align": "center", "bold": True},
+        {"type": "text", "content": "thecarte.eu", "align": "center"},
+        {"type": "divider", "char": "="},
+        {"type": "field", "key": "number", "label": "Bestell-Nr:", "format": "#{value}"},
+        {"type": "field", "key": "date_created", "label": "Datum:", "format": "{value[:16]}", "transform": "T-> "},
+        {"type": "divider", "char": "-"}
+    ],
+    "items": {
+        "type": "receipt",
+        "columns": [
+            {"key": "quantity", "width": 4},
+            {"key": "name", "width": 28},
+            {"key": "price", "format": "€{:.2f}", "width": 14, "align": "right"}
+        ]
+    },
+    "footer": [
+        {"type": "divider", "char": "-"},
+        {"type": "field", "key": "total", "label": "Gesamt:", "format": "€{value}", "align": "right", "bold": True},
+        {"type": "divider", "char": "="},
+        {"type": "text", "content": "Vielen Dank!", "align": "center", "bold": True}
+    ],
+    "cut": True
+}
 CONFIG_DIR = Path(os.getenv('APPDATA', os.path.expanduser('~'))) / 'PrintRelay'
 CONFIG_FILE = CONFIG_DIR / 'config.json'
 LOG_FILE = CONFIG_DIR / 'client.log'
@@ -164,47 +190,127 @@ def escpos_div(char='-', width=80):
     n = 48 if width >= 80 else 32
     return (char * n).encode()[:n] + b'\n'
 
-def render_ticket(template_str, order, width=80):
-    """Jinja2 模板 → ESC/POS 字节"""
-    template = Template(template_str)
-    text = template.render(order=order, now=datetime.now())
+def escpos_feed(n=1):
+    return b'\n' * n
+
+# ── JSON 模板渲染引擎 ────────────────────────────────────────
+def _fmt(value, fmt_str):
+    """格式化：{value}→原始值、{:.2f}→浮点、{:d}→整数"""
+    if fmt_str == '{value}':
+        return str(value)
+    s = fmt_str.format(value)
+    # 德文格式：小数点变逗号
+    return s.replace('.', ',')
+
+def _get_field(order, key, default=''):
+    """安全取字段，支持嵌套 key"""
+    parts = key.replace('__', '.').split('.')
+    v = order
+    for p in parts:
+        if isinstance(v, dict):
+            v = v.get(p)
+        else:
+            return default
+        if v is None:
+            return default
+    return v if v is not None else default
+
+def render_json_template(template, order, config, section):
+    """JSON 模板 → ESC/POS 字节。返回 (bytes, list_of_items_for_per_item)"""
+    width = template.get('width', 80)
+    w = 48 if width >= 80 else 32
     out = escpos_init()
-    for line in text.strip().split('\n'):
-        line = line.strip()
-        if not line: continue
-        align, bold = 'left', False
-        parts = line.split(' ', 1)
-        while parts and parts[0].startswith('.'):
-            cmd = parts[0]
-            if cmd == '.center': align = 'center'
-            elif cmd == '.right': align = 'right'
-            elif cmd == '.bold': bold = True
-            elif cmd.startswith('.div'):
-                char = cmd[4:] if len(cmd) > 4 else '-'
-                out += escpos_div(char, width); parts = []; break
-            elif cmd == '.cut':
-                out += escpos_cut(); parts = []; break
-            elif cmd == '.item':
-                rest = parts[1] if len(parts) > 1 else ''
-                # rsplit: 最后一段是价格，第一段是数量，中间全是菜名
-                toks = rest.rsplit(' ', 1)
-                prc = toks[1] if len(toks) > 1 else '0'
-                front = toks[0].split(' ', 1)
-                qty = front[0]
-                name = front[1] if len(front) > 1 else ''
-                lt = int(qty or 1) * float(prc or 0)
-                left = f"{qty}x  {name}"[:30]
-                right = f"€{lt:,.2f}".replace('.', ',')
-                n = 48 if width >= 80 else 32
-                pad = n - len(left) - len(right)
-                out += (left + ' ' * max(1, pad) + right).encode('latin-1', errors='replace') + b'\n'
-                parts = []; break
-            parts = parts[1].split(' ', 1) if len(parts) > 1 else []
-        if parts and parts[0]:
-            out += escpos_align(align)
-            if bold: out += escpos_bold(True)
-            out += escpos_line(' '.join(parts) if isinstance(parts, list) else line, width)
-            if bold: out += escpos_bold(False)
+
+    def render_block(elements):
+        buf = b''
+        for el in elements:
+            t = el.get('type', '')
+            align = el.get('align', 'left')
+            bold = el.get('bold', False)
+            opt = el.get('optional', False)
+
+            if t == 'line':
+                buf += escpos_feed(el.get('count', 1))
+            elif t == 'divider':
+                ch = el.get('char', '-')
+                buf += escpos_div(ch, width)
+            elif t == 'text':
+                buf += escpos_align(align)
+                if bold: buf += escpos_bold(True)
+                buf += escpos_line(el.get('content', ''), width)
+                if bold: buf += escpos_bold(False)
+            elif t == 'field':
+                key = el.get('key', '')
+                val = _get_field(order, key)
+                if opt and (not val or val == '0.00' or val == 0):
+                    continue
+                cond = el.get('condition')
+                if cond:
+                    try:
+                        if not eval(f'float({val!r}){cond}'):
+                            continue
+                    except: pass
+                label = el.get('label', '')
+                fmt_str = el.get('format', '{value}')
+                if key == 'date_created' and 'T' in str(val):
+                    val = str(val).replace('T', ' ')
+                text = f"{label}{_fmt(val, fmt_str)}"
+                if el.get('max_len'):
+                    text = text[:el['max_len'] + len(label)]
+                buf += escpos_align(align)
+                if bold: buf += escpos_bold(True)
+                buf += escpos_line(text, width)
+                if bold: buf += escpos_bold(False)
+        return buf
+
+    # Header
+    out += render_block(template.get('header', []))
+
+    # Items
+    items_cfg = template.get('items')
+    if items_cfg:
+        items = order.get('line_items', [])
+        # station_filter
+        flt = config.get(section, 'station_filter', fallback=None) if section else None
+        if flt:
+            items = [i for i in items if flt.lower() in i.get('name', '').lower() or flt.lower() in i.get('categories', [])]
+
+        item_type = items_cfg.get('type', 'simple')
+        if item_type in ('simple', 'receipt'):
+            for item in items:
+                cols = items_cfg.get('columns', [])
+                line_parts = []
+                for c in cols:
+                    key = c.get('key', '')
+                    val = _get_field(item, key, '0')
+                    width_c = c.get('width', 10)
+                    align_c = c.get('align', 'left')
+                    fmt_str = c.get('format', '{value}')
+                    hide = c.get('hide', False)
+                    if hide:
+                        continue
+                    text = _fmt(val, fmt_str) if c.get('format') else str(val)
+                    prefix = c.get('prefix', '')
+                    if prefix:
+                        text = f"{prefix}{text}"
+                    # 截断或填充
+                    if len(text) > width_c:
+                        text = text[:width_c]
+                    if align_c == 'right':
+                        text = text.rjust(width_c)
+                    else:
+                        text = text.ljust(width_c)
+                    line_parts.append(text)
+                buf = ''.join(line_parts)
+                out += buf.encode('latin-1', errors='replace')[:w] + b'\n'
+
+        elif item_type == 'per_item':
+            # per_item: caller 自行处理逐一切纸
+            pass
+
+    # Footer
+    out += render_block(template.get('footer', []))
+
     return out
 
 
@@ -215,6 +321,7 @@ class Client:
         if not self.token:
             self.token = secrets.token_hex(4)  # 8 位 hex
             save_token(self.token)
+        self.config = load_config()
         self.running = False
         self.state = 'idle'
         self.printers = []    # 当前打印机列表
@@ -334,24 +441,53 @@ class Client:
                     order = msg.get('order', {})
                     target_printer = msg.get('printer', '')
 
-                    # 加载模板并渲染
+                    # 匹配 config.ini 中的打印机配置
+                    sec = find_printer_section(self.config, target_printer)
+                    template = load_template(self.config, sec) if sec else None
+
+                    if not template:
+                        log.warning(f"无模板匹配: {target_printer}，使用兜底模板")
+                        template = FALLBACK_TEMPLATE
+                        sec = None
+
                     try:
-                        template_str = get_template()
-                        ticket = render_ticket(template_str, order, PAPER_WIDTH)
+                        ticket = render_json_template(template, order, self.config, sec)
                     except Exception as e:
                         log.error(f"模板渲染失败: {e}")
                         continue
 
                     printer = target_printer or (self.printers[0] if self.printers else None)
-                    if printer:
+                    if not printer:
+                        log.warning("无可用打印机")
+                        continue
+
+                    if sec:
+                        mode = self.config.get(sec, 'mode', fallback='receipt')
+                        feed_n = self.config.getint(sec, 'feed_lines', fallback=0)
+                        cut_per = self.config.getboolean(sec, 'cut_per_item', fallback=False)
+                    else:
+                        mode, feed_n, cut_per = 'receipt', 0, False
+
+                    if mode == 'per_item':
+                        # 逐菜切纸
+                        for item in order.get('line_items', []):
+                            one = {'line_items': [item],
+                                   **{k: v for k, v in order.items() if k != 'line_items'}}
+                            t = render_json_template(template, one, self.config, sec)
+                            if feed_n:
+                                t += escpos_feed(feed_n)
+                            if cut_per:
+                                t += escpos_cut()
+                            send_raw(printer, t)
+                        onum = order.get('number', '?')
+                        self._state('approved', f'per_item #{onum} -> {printer}')
+                    else:
                         ok = send_raw(printer, ticket)
                         onum = order.get('number', '?')
                         if ok:
                             self._state('approved', f'已打印 #{onum} ({len(ticket)}B) -> {printer}')
                         else:
-                            self._state('error', f'打印失败 #{onum} -> {printer}，检查打印机')
-                    else:
-                        log.warning("无可用打印机")
+                            self._state('error', f'打印失败 #{onum} -> {printer}')
                 except socket.timeout:
                     continue
                 except:
@@ -515,10 +651,15 @@ class App:
             self._log(f"复制失败，请手动复制: {token}")
 
     def _edit_template(self):
-        """用记事本打开模板文件"""
-        get_template()  # 确保存在
-        os.startfile(str(TEMPLATE_FILE))
-        self._log(f"已打开模板: {TEMPLATE_FILE}")
+        """打开模板目录或 config.ini"""
+        if TEMPLATES_DIR.exists():
+            os.startfile(str(TEMPLATES_DIR))
+            self._log(f"已打开模板目录: {TEMPLATES_DIR}")
+        elif CONFIG_FILE.exists():
+            os.startfile(str(CONFIG_FILE))
+            self._log(f"已打开配置: {CONFIG_FILE}")
+        else:
+            self._log("未找到模板目录或配置文件")
 
     def _close(self):
         self.client.stop()

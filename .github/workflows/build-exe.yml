@@ -18,7 +18,7 @@ jobs:
           python-version: '3.11'
 
       - name: 安装依赖
-        run: pip install pywin32 pyinstaller jinja2
+        run: pip install pywin32 pyinstaller
 
       - name: 编译 EXE（调试模式 · 黑窗）
         run: |

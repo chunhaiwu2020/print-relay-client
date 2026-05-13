@@ -1,0 +1,30 @@
+{
+  "width": 80,
+  "header": [
+    {"type": "text", "content": "Restaurant Asia Shanghai", "align": "center", "bold": true},
+    {"type": "text", "content": "thecarte.eu", "align": "center"},
+    {"type": "divider", "char": "="},
+    {"type": "field", "key": "number", "label": "Bestell-Nr:", "format": "#{value}"},
+    {"type": "field", "key": "date_created", "label": "Datum:", "format": "{value[:16]}", "transform": "T-> "},
+    {"type": "field", "key": "payment_method_title", "label": "Zahlung:", "optional": true},
+    {"type": "divider", "char": "-"}
+  ],
+  "items": {
+    "type": "receipt",
+    "columns": [
+      {"key": "quantity", "width": 4, "align": "center"},
+      {"key": "name", "width": 28},
+      {"key": "price", "format": "€{:.2f}", "width": 14, "align": "right"}
+    ]
+  },
+  "footer": [
+    {"type": "divider", "char": "-"},
+    {"type": "field", "key": "total", "label": "Gesamt:", "format": "€{value}", "align": "right", "bold": true},
+    {"type": "field", "key": "shipping_total", "label": "inkl. Lieferung:", "format": "€{value}", "align": "right", "optional": true, "condition": ">0"},
+    {"type": "field", "key": "customer_note", "label": "Hinweis:", "max_len": 40, "optional": true},
+    {"type": "divider", "char": "="},
+    {"type": "text", "content": "Vielen Dank!", "align": "center", "bold": true},
+    {"type": "line"}
+  ],
+  "cut": true
+}
