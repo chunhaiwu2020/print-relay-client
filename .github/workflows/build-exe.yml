@@ -20,7 +20,14 @@ jobs:
       - name: 安装依赖
         run: pip install pywin32 pyinstaller jinja2
 
-      - name: 编译 EXE
+      - name: 编译 EXE（调试模式 · 黑窗）
+        run: |
+          python build.py --console
+          ren dist\PrintRelay-Client.exe PrintRelay-Client-DEBUG.exe
+        env:
+          PYTHONIOENCODING: utf-8
+
+      - name: 编译 EXE（窗口模式）
         run: python build.py
         env:
           PYTHONIOENCODING: utf-8
@@ -29,4 +36,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PrintRelay-Client
-          path: dist/PrintRelay-Client.exe
+          path: |
+            dist/PrintRelay-Client.exe
+            dist/PrintRelay-Client-DEBUG.exe
