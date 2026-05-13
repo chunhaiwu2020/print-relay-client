@@ -22,3 +22,4 @@ backup/
 
 # Docker
 *.tar
+backups/

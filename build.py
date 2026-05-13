@@ -12,11 +12,13 @@ cmd = [
     sys.executable, '-m', 'PyInstaller',
     '--onefile', '--name', 'PrintRelay-Client',
     '--icon', 'icon.ico',
+    '--add-data', 'ticket.j2;.',
     '--collect-all', 'pywin32',
     '--collect-all', 'win32print',
     '--collect-all', 'win32api',
     '--hidden-import', 'tkinter',
     '--hidden-import', '_tkinter',
+    '--hidden-import', 'jinja2',
     '--clean', '--noconfirm',
 ]
 if not CONSOLE:

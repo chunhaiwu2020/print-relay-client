@@ -67,59 +67,8 @@ def run_async(coro):
     f = asyncio.run_coroutine_threadsafe(coro, main_loop)
     return f.result(timeout=30)
 
-# ── ESC/POS ─────────────────────────────────────────────────
-def escpos_line(text, width=80, align='left', bold=False):
-    n = 48 if width >= 80 else 32
-    text = text[:n]
-    text = text.ljust(n) if align == 'left' else text.rjust(n) if align == 'right' else text.center(n)
-    out = b''
-    if bold: out += b'\x1b\x45\x01'
-    out += text.encode('latin-1', errors='replace') + b'\n'
-    if bold: out += b'\x1b\x45\x00'
-    return out
+# ── JSON order forward (client renders with Jinja2) ──────────
 
-def escpos_div(char='-', width=80):
-    return (char * (48 if width >= 80 else 32)).encode()[:48] + b'\n'
-
-def build_ticket(order: dict, width=80):
-    o = order
-    out = b'\x1b\x40\x1b\x61\x01'
-    out += escpos_line("Restaurant Asia Shanghai", width, 'center', True)
-    out += escpos_line("thecarte.eu", width, 'center')
-    out += escpos_div('=', width)
-    num = o.get('number', o.get('id', '???'))
-    ts = (o.get('date_created', '') or '')[:19].replace('T', ' ')
-    out += escpos_line(f"Bestell-Nr: #{num}", width)
-    out += escpos_line(f"Datum: {ts}", width)
-    pm = o.get('payment_method_title', '')
-    if pm: out += escpos_line(f"Zahlung: {pm}", width)
-    out += escpos_div('-', width)
-    items = o.get('line_items', [])
-    total = 0
-    for it in items:
-        q = it.get('quantity', 1)
-        n = it.get('name', 'Artikel')
-        p = float(it.get('price', 0) or 0)
-        lt = q * p; total += lt
-        left = f"{q}x  {n}"[:30]
-        right = f"€{lt:,.2f}".replace('.', ',')
-        pad = (48 if width >= 80 else 32) - len(left) - len(right)
-        out += (left + ' ' * max(1, pad) + right).encode('latin-1', errors='replace') + b'\n'
-    out += escpos_div('-', width)
-    out += escpos_line(f"Gesamt: {'€{:,.2f}'.format(total).replace('.',',')}", width, 'right', True)
-    ship = float(o.get('shipping_total', 0) or 0)
-    if ship > 0:
-        out += escpos_line(f"inkl. Lieferung: {'€{:,.2f}'.format(ship).replace('.',',')}", width, 'right')
-    note = o.get('customer_note', '')
-    if note:
-        out += escpos_div('-', width)
-        out += escpos_line("Hinweis:", width, True)
-        out += escpos_line(note[:40], width)
-    out += escpos_div('=', width)
-    out += escpos_line("Vielen Dank!", width, 'center', True)
-    out += escpos_line(datetime.now().strftime("%d.%m.%Y %H:%M"), width, 'center')
-    out += b'\n\n\n\n\x1d\x56\x00'
-    return out
 
 # ── TCP Server ───────────────────────────────────────────────
 async def handle_client(reader, writer):
@@ -556,7 +505,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(cl)) if cl else {}
 
         # WooCommerce webhook
-        if path.startswith('/wc') and self._woo_auth():
+        if path.startswith('/wc'):
+            if not self._woo_auth():
+                self.send_error(403, 'Unauthorized token'); return
             qs = __import__('urllib').parse.parse_qs(
                 __import__('urllib').parse.urlparse(self.path).query)
             token = qs.get('token', [''])[0]
@@ -567,6 +518,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             width_mm = 80
 
             if not target_client:
+                order = body
                 # 收集所有匹配路由（一对多：订单 → 厨房 + 前台 + 吧台...）
                 matched = []
                 with state.lock:
@@ -582,18 +534,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     client = r.get('client', '')
                     printer = r.get('printer', '')
 
-                    # Get client width
-                    async def _w(name=client):
-                        async with async_lock:
-                            c = clients.get(name)
-                            return c.get('width_mm', 80) if c else 80
-                    w = run_async(_w()) or 80
-
-                    ticket = build_ticket(order, w)
-                    if printer:
-                        ticket = f"PRINTER:{printer}\n".encode() + ticket
-
-                    ok = run_async(send_to_client(client, ticket))
+                    payload = json.dumps({"type": "print", "order": order, "printer": printer}).encode()
+                    ok = run_async(send_to_client(client, payload))
                     results.append({'client': client, 'printer': printer, 'ok': ok})
 
                     if ok:
@@ -606,17 +548,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
                             })
                             if len(state.history) > 50: state.history.pop()
 
+                with state.lock: state.save()
+                self._json({'status': 'ok', 'results': results}); return
+
             else:
                 # 指定目标客户端（面板测试打印）
-                async def _w():
-                    async with async_lock:
-                        c = clients.get(target_client)
-                        return c.get('width_mm', 80) if c else 80
-                w = run_async(_w()) or 80
-                ticket = build_ticket(body, w)
-                if target_printer:
-                    ticket = f"PRINTER:{target_printer}\n".encode() + ticket
-                ok = run_async(send_to_client(target_client, ticket))
+                payload = json.dumps({"type": "print", "order": body, "printer": target_printer}).encode()
+                ok = run_async(send_to_client(target_client, payload))
                 results = [{'client': target_client, 'printer': target_printer, 'ok': ok}]
                 if ok:
                     with state.lock:

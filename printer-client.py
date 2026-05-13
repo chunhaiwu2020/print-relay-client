@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-Print Relay Client v2.2 — 中文版
+Print Relay Client v3 — 客户端渲染版
 启动 → 显示配对码 → 扫描打印机 → 管理员在面板添加 → 自动连接
+服务器发 JSON → 客户端 Jinja2 渲染 ESC/POS → 打印机
 """
 
 import socket, struct, json, os, sys, time, threading, secrets, logging
+from datetime import datetime
 from pathlib import Path
+from jinja2 import Template
 
 # ── 硬编码 ───────────────────────────────────────────────────
 RELAY_HOST = "relay.thecarte.eu"
 RELAY_PORT = 51900
 PAPER_WIDTH = 80
+TEMPLATE_FILE = (Path(getattr(sys, '_MEIPASS', Path(__file__).parent)) / "ticket.j2")  # 默认模板
 
 # ── 配置 ─────────────────────────────────────────────────────
 CONFIG_DIR = Path(os.getenv('APPDATA', os.path.expanduser('~'))) / 'PrintRelay'
@@ -97,6 +101,69 @@ def send_raw(printer, data):
         finally: win32print.ClosePrinter(h)
     except Exception as e:
         log.error(f"打印失败: {e}"); return False
+
+
+# ── ESC/POS 渲染引擎 ──────────────────────────────────────────
+def escpos_init():
+    return b'\x1b\x40'
+
+def escpos_align(align='left'):
+    m = {'left': 0, 'center': 1, 'right': 2}
+    return b'\x1b\x61' + bytes([m.get(align, 0)])
+
+def escpos_bold(on=True):
+    return b'\x1b\x45' + bytes([1 if on else 0])
+
+def escpos_cut():
+    return b'\n\n\n\n\x1d\x56\x00'
+
+def escpos_line(text, width=80):
+    n = 48 if width >= 80 else 32
+    return text.encode('latin-1', errors='replace')[:n] + b'\n'
+
+def escpos_div(char='-', width=80):
+    n = 48 if width >= 80 else 32
+    return (char * n).encode()[:n] + b'\n'
+
+def render_ticket(template_str, order, width=80):
+    """Jinja2 模板 → ESC/POS 字节"""
+    template = Template(template_str)
+    text = template.render(order=order, now=datetime.now())
+    out = escpos_init()
+    for line in text.strip().split('\n'):
+        line = line.strip()
+        if not line: continue
+        align, bold = 'left', False
+        parts = line.split(' ', 1)
+        while parts and parts[0].startswith('.'):
+            cmd = parts[0]
+            if cmd == '.center': align = 'center'
+            elif cmd == '.right': align = 'right'
+            elif cmd == '.bold': bold = True
+            elif cmd.startswith('.div'):
+                char = cmd[4:] if len(cmd) > 4 else '-'
+                out += escpos_div(char, width); parts = []; break
+            elif cmd == '.cut':
+                out += escpos_cut(); parts = []; break
+            elif cmd == '.item':
+                rest = parts[1] if len(parts) > 1 else ''
+                toks = rest.split(' ', 2)
+                qty, name, prc = (toks + ['', '', ''])[:3]
+                lt = int(qty or 1) * float(prc or 0)
+                left = f"{qty}x  {name}"[:30]
+                right = f"€{lt:,.2f}".replace('.', ',')
+                n = 48 if width >= 80 else 32
+                pad = n - len(left) - len(right)
+                out += (left + ' ' * max(1, pad) + right).encode('latin-1', errors='replace') + b'\n'
+                parts = []; break
+            parts = parts[1].split(' ', 1) if len(parts) > 1 else []
+        if parts and parts[0]:
+            out += escpos_align(align)
+            if bold: out += escpos_bold(True)
+            out += escpos_line(' '.join(parts) if isinstance(parts, list) else line, width)
+            if bold: out += escpos_bold(False)
+    return out
+
 
 # ── 客户端核心 ───────────────────────────────────────────────
 class Client:
@@ -206,16 +273,34 @@ class Client:
                     data = self._recv(sock, length)
                     if not data: break
 
-                    target = None
-                    if data.startswith(b'PRINTER:'):
-                        nl = data.index(b'\n')
-                        target = data[8:nl].decode()
-                        data = data[nl+1:]
+                    try:
+                        msg = json.loads(data.decode('utf-8'))
+                    except:
+                        log.warning(f"无效 JSON: {data[:100]}")
+                        continue
 
-                    printer = target or (self.printers[0] if self.printers else None)
+                    if msg.get('type') != 'print':
+                        continue
+
+                    order = msg.get('order', {})
+                    target_printer = msg.get('printer', '')
+
+                    # 加载模板并渲染
+                    try:
+                        template_str = TEMPLATE_FILE.read_text(encoding='utf-8')
+                    except:
+                        log.error(f"无法加载模板: {TEMPLATE_FILE}")
+                        continue
+
+                    ticket = render_ticket(template_str, order, PAPER_WIDTH)
+
+                    printer = target_printer or (self.printers[0] if self.printers else None)
                     if printer:
-                        send_raw(printer, data)
-                        self._state('approved', f'打印 {len(data)}B -> {printer}')
+                        send_raw(printer, ticket)
+                        onum = order.get('number', '?')
+                        self._state('approved', f'打印 #{onum} ({len(ticket)}B) -> {printer}')
+                    else:
+                        log.warning("无可用打印机")
                 except socket.timeout:
                     continue
                 except:

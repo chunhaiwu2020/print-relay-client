@@ -12,11 +12,13 @@ cmd = [
     sys.executable, '-m', 'PyInstaller',
     '--onefile', '--name', 'PrintRelay-Client',
     '--icon', 'icon.ico',
+    '--add-data', 'ticket.j2;.',
     '--collect-all', 'pywin32',
     '--collect-all', 'win32print',
     '--collect-all', 'win32api',
     '--hidden-import', 'tkinter',
     '--hidden-import', '_tkinter',
+    '--hidden-import', 'jinja2',
     '--clean', '--noconfirm',
 ]
 if not CONSOLE:
@@ -24,6 +26,6 @@ if not CONSOLE:
 cmd.append('printer-client.py')
 
 print(f">>> {' '.join(cmd)}")
-subprocess.run(cmd, check=True)
-print("\n[OK] EXE 生成在 dist/PrintRelay-Client.exe")
-print("   复制到店 PC → 双击 → 复制配对码 → 面板添加配对 → 完事")
+subprocess.run(cmd, check=True, env={**__import__('os').environ, 'PYTHONIOENCODING': 'utf-8'})
+print("\n[OK] EXE built: dist/PrintRelay-Client.exe")
+print("   Copy to store PC -> double-click to run")
