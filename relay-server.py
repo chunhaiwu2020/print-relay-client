@@ -425,7 +425,8 @@ async function sendTest(){
  let itemsRaw=document.getElementById('test_items').value;
  let items=[];
  itemsRaw.split('|').forEach(p=>{let x=p.split(',');if(x.length>=2)items.push({name:x[0].trim(),price:parseFloat(x[1]),quantity:parseInt(x[2]||1)})});
- let body=JSON.stringify({number:document.getElementById('test_order').value,date_created:new Date().toISOString(),payment_method_title:'Test',line_items:items,shipping_total:'0.00'});
+ let tot=items.reduce((s,i)=>s+(i.price||0)*(i.quantity||1),0).toFixed(2);
+ let body=JSON.stringify({number:document.getElementById('test_order').value,date_created:new Date().toISOString(),payment_method_title:'Test',total:tot,line_items:items,shipping_total:'0.00'});
  let hdrs={'Content-Type':'application/json','X-Print-Client':r.client,'X-Printer-Name':r.printer};
  if(document.getElementById('test_cut').checked) hdrs['X-Cut-Per-Item']='1';
  let res=await fetch('/wc?token='+(r.woo_token||''),{method:'POST',headers:hdrs,body:body});
