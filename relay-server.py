@@ -340,15 +340,30 @@ async function refresh(){
  }
  document.getElementById('pairings').innerHTML=ph;
 
- // 更新路由下拉
+ // 更新路由下拉（保留选中值）
  let sources=Object.entries(d.pairings||{}).filter(([t,p])=>p.type!=='client');
  let clients=Object.entries(d.pairings||{}).filter(([t,p])=>p.type==='client');
  let ws=document.getElementById('rt_woo');
+ let ws_val=ws.value;
+ let cs=document.getElementById('rt_client');
+ let cs_val=cs.value;
+ let ps=document.getElementById('rt_printer');
+ let ps_val=ps.value;
+
  ws.innerHTML='<option value="">— 选择来源 —</option>';
  sources.forEach(([t,p])=>ws.add(new Option(p.name+' ('+t+')',t)));
- let cs=document.getElementById('rt_client');
+ ws.value=ws_val;  // 恢复选中（若仍存在）
+
  cs.innerHTML='<option value="">— 选择客户端 —</option>';
  clients.forEach(([t,p])=>cs.add(new Option(p.name,p.name)));
+ cs.value=cs_val;
+
+ // 恢复打印机下拉
+ if(cs_val){
+  let cl=clients.find(x=>x[1].name===cs_val);
+  if(cl&&cl[1].printers) cl[1].printers.forEach(p=>ps.add(new Option(p,p)));
+  ps.value=ps_val;
+ }
 
  // 客户端切换时刷新打印机列表
  document.getElementById('rt_client').onchange=function(){

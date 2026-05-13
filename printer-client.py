@@ -4,7 +4,7 @@ Print Relay Client v2.2 — 中文版
 启动 → 显示配对码 → 扫描打印机 → 管理员在面板添加 → 自动连接
 """
 
-import socket, struct, json, os, sys, time, threading, secrets, logging, subprocess
+import socket, struct, json, os, sys, time, threading, secrets, logging
 from pathlib import Path
 
 # ── 硬编码 ───────────────────────────────────────────────────
@@ -41,33 +41,39 @@ def save_token(token, extra=None):
 
 # ── 打印机 ──────────────────────────────────────────────────
 def list_printers():
-    """多层枚举：本地 → 网络 → 默认打印机 → 空"""
+    """全量枚举：三路合并去重，不短路"""
     try:
         import win32print
-        printers = []
-        # 方法1: 本地 + 网络打印机
+        seen = set()
+
+        def add(lst):
+            for p in lst:
+                if p and p not in seen:
+                    seen.add(p)
+
+        # 方法1: 本地 + 网络 (level 1)
         try:
             flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
-            printers = [p['pPrinterName'] for p in win32print.EnumPrinters(flags, None, 1)
-                       if p.get('pPrinterName')]
+            add(p['pPrinterName'] for p in win32print.EnumPrinters(flags, None, 1) if p.get('pPrinterName'))
         except Exception as e:
-            log.warning(f"EnumPrinters 失败: {e}")
-        # 方法2: 默认打印机
-        if not printers:
-            try:
-                def_printer = win32print.GetDefaultPrinter()
-                if def_printer:
-                    printers = [def_printer]
-                    log.info(f"使用默认打印机: {def_printer}")
-            except Exception as e:
-                log.warning(f"GetDefaultPrinter 失败: {e}")
-        # 方法3: 枚举级别2（含更多信息）
-        if not printers:
-            try:
-                printers = [p['pPrinterName'] for p in win32print.EnumPrinters(
-                    win32print.PRINTER_ENUM_LOCAL, None, 2) if p.get('pPrinterName')]
-            except Exception as e:
-                log.warning(f"EnumPrinters level 2 失败: {e}")
+            log.warning(f"EnumPrinters level 1 失败: {e}")
+
+        # 方法2: 本地 (level 2，含虚拟打印机)
+        try:
+            add(p['pPrinterName'] for p in win32print.EnumPrinters(
+                win32print.PRINTER_ENUM_LOCAL, None, 2) if p.get('pPrinterName'))
+        except Exception as e:
+            log.warning(f"EnumPrinters level 2 失败: {e}")
+
+        # 方法3: 默认打印机兜底
+        try:
+            def_printer = win32print.GetDefaultPrinter()
+            if def_printer:
+                add([def_printer])
+        except Exception as e:
+            log.warning(f"GetDefaultPrinter 失败: {e}")
+
+        printers = sorted(seen)  # 排序，稳定顺序
         if printers:
             log.info(f"检测到 {len(printers)} 台打印机: {printers}")
         else:
@@ -341,20 +347,27 @@ class App:
         self.log_txt.config(state=self.tk.DISABLED)
 
     def _copy_token(self):
-        """复制配对码到剪贴板（双重保障）"""
+        """复制配对码到剪贴板（win32clipboard 直写 + tkinter 兜底）"""
         token = self.client.token
         ok = False
-        # 方法1: tkinter 剪贴板
+        # 方法1: win32clipboard 直接操作（最可靠）
         try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(token)
-            ok = True
+            import win32clipboard
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(token)
+                ok = True
+            finally:
+                win32clipboard.CloseClipboard()
         except Exception:
             pass
-        # 方法2: Windows clip.exe 兜底
+        # 方法2: tkinter 兜底
         if not ok:
             try:
-                subprocess.run(['clip.exe'], input=token, text=True, timeout=2)
+                self.root.clipboard_clear()
+                self.root.clipboard_append(token)
+                self.root.update()  # 强制刷新剪贴板
                 ok = True
             except Exception:
                 pass
