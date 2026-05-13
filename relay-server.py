@@ -377,6 +377,7 @@ async function refresh(){
  // 路由表
  let rd=await api('/api/routes');
  let rh='',rt=document.getElementById('test_route');
+  let rt_val=rt.value;
  rt.innerHTML='<option value="">— 选择路由 —</option>';
  if(!rd.routes||rd.routes.length===0){
   rh='<span class="empty">暂无路由 — 请先添加 WooCommerce 和客户端配对，然后配置路由</span>';
@@ -390,6 +391,7 @@ async function refresh(){
   rh+='</table>';
  }
  document.getElementById('routes').innerHTML=rh;
+  rt.value=rt_val;
 
  // 历史
  let hd=await api('/api/history');
@@ -456,9 +458,17 @@ async function sendTest(){
  itemsRaw.split('|').forEach(p=>{let x=p.split(',');if(x.length>=2)items.push({name:x[0].trim(),price:parseFloat(x[1]),quantity:parseInt(x[2]||1)})});
  let body=JSON.stringify({number:document.getElementById('test_order').value,date_created:new Date().toISOString(),payment_method_title:'Test',line_items:items,shipping_total:'0.00'});
  let res=await fetch('/wc?token='+(r.woo_token||''),{method:'POST',headers:{'Content-Type':'application/json','X-Print-Client':r.client,'X-Printer-Name':r.printer},body:body});
- let j=await res.json();
- document.getElementById('test_msg').className=res.ok?'msg ok':'msg err';
- document.getElementById('test_msg').textContent=res.ok?'✅ 已发送 → '+JSON.stringify(j):'❌ 失败';
+ let msg=document.getElementById('test_msg');
+ try{
+  let j=await res.json();
+  if(res.ok){
+   msg.className='msg ok';msg.textContent='✅ 已发送 → '+JSON.stringify(j);
+  }else{
+   msg.className='msg err';msg.textContent='❌ '+(res.status+' '+(j.detail||j.error||j.message||res.statusText));
+  }
+ }catch(e){
+  msg.className='msg err';msg.textContent='❌ 服务器返回: '+res.status+' '+res.statusText;
+ }
  refresh();
 }
 
