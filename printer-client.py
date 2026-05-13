@@ -489,6 +489,36 @@ class Client:
         if self.on_state: self.on_state(s, msg)
 
 # ── GUI ──────────────────────────────────────────────────────
+# 托盘图标 (ctypes, 纯 stdlib)
+import ctypes as _ct
+from ctypes import wintypes as _w
+
+_NIM_ADD, _NIM_DELETE, _NIM_MODIFY = 0, 2, 1
+_NIF_MESSAGE, _NIF_ICON, _NIF_TIP = 1, 2, 4
+_WM_TRAY = 0x8000 + 1
+
+class _NOTIFYICONDATA(_ct.Structure):
+    _fields_ = [("cbSize", _w.DWORD), ("hWnd", _w.HWND), ("uID", _w.UINT),
+                ("uFlags", _w.UINT), ("uCallbackMessage", _w.UINT),
+                ("hIcon", _w.HICON), ("szTip", _w.CHAR * 128)]
+
+def _tray_add(hwnd, tip="Print Relay"):
+    nid = _NOTIFYICONDATA()
+    nid.cbSize = _ct.sizeof(nid)
+    nid.hWnd = hwnd
+    nid.uID = 1
+    nid.uFlags = _NIF_MESSAGE | _NIF_TIP
+    nid.uCallbackMessage = _WM_TRAY
+    nid.szTip = tip.encode('utf-8')[:127]
+    return _ct.windll.shell32.Shell_NotifyIconA(_NIM_ADD, _ct.byref(nid))
+
+def _tray_del(hwnd):
+    nid = _NOTIFYICONDATA()
+    nid.cbSize = _ct.sizeof(nid)
+    nid.hWnd = hwnd
+    nid.uID = 1
+    return _ct.windll.shell32.Shell_NotifyIconA(_NIM_DELETE, _ct.byref(nid))
+
 class App:
     def __init__(self):
         import tkinter as tk; from tkinter import ttk
@@ -501,6 +531,14 @@ class App:
         self.root.geometry("460x440")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+
+        # 托盘图标
+        self._tray_menu = None
+        self.root.after(500, self._init_tray)
+
+        # 开机启动参数
+        if '--startup' in sys.argv:
+            self.root.withdraw()
 
         self._build()
         # 启动时先扫描打印机
@@ -638,13 +676,64 @@ class App:
             self._log("未找到模板目录或配置文件")
 
     def _close(self):
+        self.root.withdraw()
+        self._log("已最小化到通知区域")
+
+    def _quit(self):
+        """彻底退出"""
+        _tray_del(int(self.root.frame(), 16))
         self.client.stop()
         self.root.destroy()
+
+    def _show(self):
+        self.root.deiconify()
+        self.root.lift()
+
+    def _init_tray(self):
+        """创建托盘图标"""
+        try:
+            hwnd = int(self.root.frame(), 16)
+        except:
+            self.root.after(1000, self._init_tray); return
+        _tray_add(hwnd, "Print Relay")
+        self.root.bind('<<TrayCallback>>', self._on_tray)
+        self._poll_tray()
+
+    def _poll_tray(self):
+        msg = _w.MSG()
+        while _ct.windll.user32.PeekMessageA(_ct.byref(msg), 0, _WM_TRAY, _WM_TRAY, 1):
+            self.root.event_generate('<<TrayCallback>>', data=str(msg.lParam))
+        self.root.after(200, self._poll_tray)
+
+    def _on_tray(self, event):
+        data = int(event.data) if hasattr(event, 'data') else 0
+        if data == 0x0202:  # 双击
+            self._show()
+        elif data == 0x0205:  # 右键
+            self._show_tray_menu()
+
+    def _show_tray_menu(self):
+        m = self.tk.Menu(self.root, tearoff=0)
+        m.add_command(label="显示窗口", command=self._show)
+        m.add_separator()
+        m.add_command(label="退出", command=self._quit)
+        try:
+            m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        finally:
+            m.grab_release()
 
     def run(self):
         self.root.mainloop()
 
 def main():
+    if '--install' in sys.argv:
+        _install_autostart()
+        print("已注册开机启动（注册表 Run）")
+        return
+    if '--uninstall' in sys.argv:
+        _uninstall_autostart()
+        print("已移除开机启动")
+        return
     if '--no-gui' in sys.argv:
         c = Client(); c.start()
         print(f"配对码: {c.token}"); print("按 Ctrl+C 退出")
@@ -652,7 +741,6 @@ def main():
             while True: time.sleep(1)
         except KeyboardInterrupt: c.stop()
     elif '--scan' in sys.argv:
-        # 命令行模式：仅扫描打印机（诊断用）
         printers = list_printers()
         if printers:
             print(f"检测到 {len(printers)} 台打印机:")
@@ -660,10 +748,26 @@ def main():
                 print(f"  - {p}")
         else:
             print("未检测到打印机")
-            print("请检查: 1) Print Spooler 服务是否运行")
-            print("        2) 是否安装了打印机驱动")
     else:
         App().run()
+
+def _install_autostart():
+    """写入注册表 HKCU\...\Run 实现开机启动 (--startup 参数隐藏窗口)"""
+    import winreg
+    exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+        r'Software\Microsoft\Windows\CurrentVersion\Run', 0, winreg.KEY_SET_VALUE)
+    winreg.SetValueEx(key, 'PrintRelay', 0, winreg.REG_SZ, f'\"{exe}\" --startup')
+    winreg.CloseKey(key)
+
+def _uninstall_autostart():
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+            r'Software\Microsoft\Windows\CurrentVersion\Run', 0, winreg.KEY_SET_VALUE)
+        winreg.DeleteValue(key, 'PrintRelay')
+        winreg.CloseKey(key)
+    except: pass
 
 if __name__ == '__main__':
     main()
