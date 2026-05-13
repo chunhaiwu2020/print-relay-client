@@ -22,7 +22,7 @@
     },
     {
       "repeat": "items",
-      "left": "{{qty}} x {{item_code}} {{name}}",
+      "left": "{{qty}} x{{item_code}} {{name}}",
       "right": "{{total}}",
       "bold": true
     },

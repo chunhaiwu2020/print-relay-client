@@ -167,122 +167,126 @@ def escpos_feed(n=1):
     return b'\n' * n
 
 # ── JSON 模板渲染引擎 ────────────────────────────────────────
-def _fmt(value, fmt_str):
-    """格式化：{value}→原始值、{:.2f}→浮点、{:d}→整数"""
-    if fmt_str == '{value}':
-        return str(value)
-    s = fmt_str.format(value)
-    # 德文格式：小数点变逗号
-    return s.replace('.', ',')
+import re as _re
 
-def _get_field(order, key, default=''):
-    """安全取字段，支持嵌套 key"""
-    parts = key.replace('__', '.').split('.')
-    v = order
-    for p in parts:
-        if isinstance(v, dict):
-            v = v.get(p)
-        else:
-            return default
-        if v is None:
-            return default
-    return v if v is not None else default
+# 变量映射：模板变量 → WooCommerce 订单字段访问方式
+VAR_MAP = {
+    'restaurant_name': 'Restaurant Asia Shanghai',
+    'id': lambda o: str(o.get('number', o.get('id', '?'))),
+    'table_id': lambda o: str(o.get('table_id', o.get('table', '?'))),
+    'table': lambda o: str(o.get('table', o.get('table_id', '?'))),
+    'printed_at': lambda o: datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    'total_amount': lambda o: str(o.get('total', '0')),
+    'qty': lambda item: str(item.get('quantity', 1)),
+    'item_code': lambda item: str(item.get('sku', item.get('id', ''))),
+    'name': lambda item: str(item.get('name', '')),
+    'price': lambda item: str(item.get('price', '0')),
+    'total': lambda item: str(item.get('total', item.get('price', '0'))),
+}
+
+def _resolve_vars(template_str, order, item=None):
+    """替换 {{var}} 为实际值"""
+    def repl(m):
+        key = m.group(1)
+        if key in VAR_MAP:
+            v = VAR_MAP[key]
+            if callable(v):
+                return v(item) if item is not None else v(order)
+            return str(v)
+        return m.group(0)
+    return _re.sub(r'\{\{(\w+)\}\}', repl, template_str)
+
+def escpos_size(on, size=''):
+    """size: xl=双高双宽, wide=双宽"""
+    if not on or not size:
+        return b''
+    if size == 'xl':
+        return b'\x1d\x21\x11'  # 双高双宽
+    elif size == 'wide':
+        return b'\x1d\x21\x10'  # 双宽
+    return b''
+
+def escpos_size_off():
+    return b'\x1d\x21\x00'
+
+def escpos_line_len(text, width_mm):
+    """根据 mm 宽度计算字符数（热敏纸 ~2 chars/mm）"""
+    n = int(width_mm * 1.8)  # 48mm → ~86 chars, 42mm → ~75 chars
+    return text.encode('latin-1', errors='replace')[:n] + b'\n'
 
 def render_json_template(template, order, config, section):
-    """JSON 模板 → ESC/POS 字节。返回 (bytes, list_of_items_for_per_item)"""
-    width = template.get('width', 80)
-    w = 48 if width >= 80 else 32
+    """用户 JSON 模板格式 → ESC/POS 字节"""
+    width_mm = template.get('width', 48)
     out = escpos_init()
 
-    def render_block(elements):
-        buf = b''
-        for el in elements:
-            t = el.get('type', '')
-            align = el.get('align', 'left')
-            bold = el.get('bold', False)
-            opt = el.get('optional', False)
+    lines = template.get('lines', [])
+    items = order.get('line_items', [])
 
-            if t == 'line':
-                buf += escpos_feed(el.get('count', 1))
-            elif t == 'divider':
-                ch = el.get('char', '-')
-                buf += escpos_div(ch, width)
-            elif t == 'text':
-                buf += escpos_align(align)
-                if bold: buf += escpos_bold(True)
-                buf += escpos_line(el.get('content', ''), width)
-                if bold: buf += escpos_bold(False)
-            elif t == 'field':
-                key = el.get('key', '')
-                val = _get_field(order, key)
-                if opt and (not val or val == '0.00' or val == 0):
-                    continue
-                cond = el.get('condition')
-                if cond:
-                    try:
-                        if not eval(f'float({val!r}){cond}'):
-                            continue
-                    except: pass
-                label = el.get('label', '')
-                fmt_str = el.get('format', '{value}')
-                if key == 'date_created' and 'T' in str(val):
-                    val = str(val).replace('T', ' ')
-                text = f"{label}{_fmt(val, fmt_str)}"
-                if el.get('max_len'):
-                    text = text[:el['max_len'] + len(label)]
-                buf += escpos_align(align)
-                if bold: buf += escpos_bold(True)
-                buf += escpos_line(text, width)
-                if bold: buf += escpos_bold(False)
-        return buf
+    # station_filter
+    flt = config.get(section, 'station_filter', fallback=None) if section else None
+    if flt:
+        items = [i for i in items if flt.lower() in i.get('name', '').lower() or flt.lower() in i.get('categories', [])]
 
-    # Header
-    out += render_block(template.get('header', []))
+    for el in lines:
+        if 'hr' in el:
+            ch = el.get('hr', '-')
+            n = int(width_mm * 1.8)
+            out += (ch * n).encode()[:n] + b'\n'
+            continue
 
-    # Items
-    items_cfg = template.get('items')
-    if items_cfg:
-        items = order.get('line_items', [])
-        # station_filter
-        flt = config.get(section, 'station_filter', fallback=None) if section else None
-        if flt:
-            items = [i for i in items if flt.lower() in i.get('name', '').lower() or flt.lower() in i.get('categories', [])]
-
-        item_type = items_cfg.get('type', 'simple')
-        if item_type in ('simple', 'receipt'):
+        if 'repeat' in el and el['repeat'] == 'items':
             for item in items:
-                cols = items_cfg.get('columns', [])
-                line_parts = []
-                for c in cols:
-                    key = c.get('key', '')
-                    val = _get_field(item, key, '0')
-                    width_c = c.get('width', 10)
-                    align_c = c.get('align', 'left')
-                    fmt_str = c.get('format', '{value}')
-                    hide = c.get('hide', False)
-                    if hide:
-                        continue
-                    text = _fmt(val, fmt_str) if c.get('format') else str(val)
-                    prefix = c.get('prefix', '')
-                    if prefix:
-                        text = f"{prefix}{text}"
-                    # 截断或填充
-                    if len(text) > width_c:
-                        text = text[:width_c]
-                    if align_c == 'right':
-                        text = text.rjust(width_c)
-                    else:
-                        text = text.ljust(width_c)
-                    line_parts.append(text)
-                buf = ''.join(line_parts)
-                out += buf.encode('latin-1', errors='replace')[:w] + b'\n'
+                sz = el.get('size', '')
+                bold = el.get('bold', False)
 
-        elif item_type == 'per_item':
-            # per_item: caller 自行处理逐一切纸
-            pass
+                if sz:
+                    out += escpos_size(True, sz)
+                if bold:
+                    out += escpos_bold(True)
 
-    # Footer
-    out += render_block(template.get('footer', []))
+                if 'text' in el:
+                    txt = _resolve_vars(el['text'], order, item)
+                    al = el.get('align', 'left')
+                    if al == 'center':
+                        out += escpos_align('center')
+                    elif al == 'right':
+                        out += escpos_align('right')
+                    out += escpos_line_len(txt, width_mm)
+                elif 'left' in el or 'right' in el:
+                    left = _resolve_vars(el.get('left', ''), order, item)
+                    right = _resolve_vars(el.get('right', ''), order, item)
+                    n = int(width_mm * 1.8)
+                    txt = left.ljust(n - len(right)) + right
+                    out += escpos_line_len(txt, width_mm)
+
+                if sz:
+                    out += escpos_size_off()
+                if bold:
+                    out += escpos_bold(False)
+            continue
+
+        if 'text' in el:
+            txt = _resolve_vars(el['text'], order)
+            al = el.get('align', 'left')
+            bold = el.get('bold', False)
+            sz = el.get('size', '')
+
+            if sz:
+                out += escpos_size(True, sz)
+            if bold:
+                out += escpos_bold(True)
+
+            if al == 'center':
+                out += escpos_align('center')
+            elif al == 'right':
+                out += escpos_align('right')
+
+            out += escpos_line_len(txt, width_mm)
+
+            if sz:
+                out += escpos_size_off()
+            if bold:
+                out += escpos_bold(False)
 
     return out
 
