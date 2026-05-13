@@ -23,25 +23,25 @@ DEFAULT_TEMPLATE = """\
 .center.bold Restaurant Asia Shanghai
 .center thecarte.eu
 .div=
-.left Bestell-Nr: #{{ order.number }}
-.left Datum: {{ order.date_created[:19]|replace('T', ' ') }}
-{% if order.payment_method_title %}
-.left Zahlung: {{ order.payment_method_title }}
+.left Bestell-Nr: #{{ order["number"] }}
+.left Datum: {{ order["date_created"][:19]|replace('T', ' ') }}
+{% if order["payment_method_title"] %}
+.left Zahlung: {{ order["payment_method_title"] }}
 {% endif %}
 .div-
-{% for item in order.line_items %}
-.item {{ item.quantity }} {{ item.name }} {{ "%.2f"|format(item.price|float) }}
-{% if order.cut_per_item %}.cut{% endif %}
+{% for item in order["line_items"] %}
+.item {{ item["quantity"] }} {{ item["name"] }} {{ "%.2f"|format(item["price"]|float) }}
+{% if order["cut_per_item"] %}.cut{% endif %}
 {% endfor %}
 .div-
-.right.bold Gesamt: €{{ "%.2f"|format(order.total|float) }}
-{% if order.shipping_total|float > 0 %}
-.right inkl. Lieferung: €{{ "%.2f"|format(order.shipping_total|float) }}
+.right.bold Gesamt: €{{ "%.2f"|format(order["total"]|float) }}
+{% if order["shipping_total"]|float > 0 %}
+.right inkl. Lieferung: €{{ "%.2f"|format(order["shipping_total"]|float) }}
 {% endif %}
-{% if order.customer_note %}
+{% if order["customer_note"] %}
 .div-
 .bold Hinweis:
-.left {{ order.customer_note[:40] }}
+.left {{ order["customer_note"][:40] }}
 {% endif %}
 .div=
 .center.bold Vielen Dank!
