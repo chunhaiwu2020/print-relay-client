@@ -1,0 +1,14 @@
+{
+  "width": 48,
+  "lines": [
+    { "text": "MESA {{table_id}}", "align": "center", "size": "xl", "bold": true },
+    { "text": "{{printed_at}}", "align": "center" },
+    { "hr": "-" },
+    { "repeat": "items",
+      "left": "{{qty}} x {{item_code}} {{name}}",
+      "right": "{{price}}",
+      "bold": true,
+      "size": "xl"
+    }
+  ]
+}
