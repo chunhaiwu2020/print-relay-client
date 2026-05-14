@@ -489,6 +489,46 @@ class Client:
         if self.on_state: self.on_state(s, msg)
 
 # ── GUI ──────────────────────────────────────────────────────
+# 托盘图标 (ctypes, 窗口过程钩子 — 不轮询)
+import ctypes as _ct
+from ctypes import wintypes as _w
+
+_NIM_ADD, _NIM_DELETE = 0, 2
+_NIF_MESSAGE, _NIF_ICON, _NIF_TIP = 1, 2, 4
+_WM_TRAY = 0x8000 + 1
+
+class _NOTIFYICONDATA(_ct.Structure):
+    _fields_ = [("cbSize", _w.DWORD), ("hWnd", _w.HWND), ("uID", _w.UINT),
+                ("uFlags", _w.UINT), ("uCallbackMessage", _w.UINT),
+                ("hIcon", _w.HICON), ("szTip", _w.CHAR * 128)]
+
+def _get_printer_icon():
+    """获取打印机图标 (SHGetStockIconInfo)"""
+    class _SI(_ct.Structure):
+        _fields_ = [("cbSize", _w.DWORD), ("hIcon", _w.HICON),
+                    ("iSysImageIndex", _ct.c_int), ("iIcon", _ct.c_int),
+                    ("szPath", _w.CHAR * 260)]
+    si = _SI(); si.cbSize = _ct.sizeof(si)
+    try:
+        _ct.windll.shell32.SHGetStockIconInfo(16, 0x100, _ct.byref(si))
+        if si.hIcon: return si.hIcon
+    except: pass
+    return _ct.windll.user32.LoadIconW(0, 32512)
+
+# 窗口过程钩子回调
+_WNDPROC = _ct.WINFUNCTYPE(_ct.c_void_p, _w.HWND, _ct.c_uint, _w.WPARAM, _w.LPARAM)
+_orig_proc = None
+_tray_cb = {}
+
+def _wnd_proc(hwnd, msg, wparam, lparam):
+    if msg == _WM_TRAY:
+        if lparam == 0x0205:  # 右键
+            if 'menu' in _tray_cb: _tray_cb['menu']()
+        elif lparam in (0x0202, 0x0203):  # 单击/双击
+            if 'show' in _tray_cb: _tray_cb['show']()
+        return 0
+    return _ct.windll.user32.CallWindowProcA(_orig_proc, hwnd, msg, wparam, lparam)
+
 class App:
     def __init__(self):
         import tkinter as tk; from tkinter import ttk
@@ -501,6 +541,14 @@ class App:
         self.root.geometry("460x440")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
+
+        # 托盘图标
+        self._hicon = None
+        self.root.after(500, self._init_tray)
+
+        # 开机启动参数
+        if '--startup' in sys.argv:
+            self.root.withdraw()
 
         self._build()
         # 启动时先扫描打印机
@@ -638,13 +686,84 @@ class App:
             self._log("未找到模板目录或配置文件")
 
     def _close(self):
+        """最小化到通知区域"""
+        self.root.withdraw()
+        self._log("已最小化到通知区域")
+
+    def _quit(self):
+        """彻底退出"""
+        try:
+            _ct.windll.shell32.Shell_NotifyIconA(_NIM_DELETE, _ct.byref(_NOTIFYICONDATA()))
+        except: pass
+        if self._hicon:
+            try: _ct.windll.user32.DestroyIcon(self._hicon)
+            except: pass
         self.client.stop()
         self.root.destroy()
+
+    def _show(self):
+        """还原窗口"""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _init_tray(self):
+        """创建托盘图标 (窗口过程钩子)"""
+        global _orig_proc
+        try:
+            hwnd = int(self.root.frame(), 16)
+        except:
+            self.root.after(1000, self._init_tray); return
+
+        hicon = _get_printer_icon()
+        self._hicon = hicon
+
+        # 安装窗口过程钩子
+        _orig_proc = _ct.windll.user32.SetWindowLongPtrA(
+            hwnd, -4, _ct.cast(_WNDPROC(_wnd_proc), _ct.c_void_p).value)
+
+        # 设置回调
+        _tray_cb['show'] = self._show
+        _tray_cb['menu'] = self._show_tray_menu
+
+        # 添加托盘图标
+        nid = _NOTIFYICONDATA()
+        nid.cbSize = _ct.sizeof(nid)
+        nid.hWnd = hwnd
+        nid.uID = 1
+        nid.uFlags = _NIF_MESSAGE | _NIF_ICON | _NIF_TIP
+        nid.uCallbackMessage = _WM_TRAY
+        nid.hIcon = hicon
+        nid.szTip = b"Print Relay"
+        _ct.windll.shell32.Shell_NotifyIconA(_NIM_ADD, _ct.byref(nid))
+        self._log("托盘图标已创建")
+
+    def _show_tray_menu(self):
+        m = self.tk.Menu(self.root, tearoff=0)
+        m.add_command(label="显示窗口", command=self._show)
+        m.add_separator()
+        m.add_command(label="退出", command=self._quit)
+        try:
+            m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
+        finally:
+            m.grab_release()
 
     def run(self):
         self.root.mainloop()
 
 def main():
+    if '--install' in sys.argv:
+        _install_autostart()
+        print("已注册开机启动")
+        return
+    if '--uninstall' in sys.argv:
+        _uninstall_autostart()
+        print("已移除开机启动")
+        return
+
+    # 单实例检查
+    _check_single_instance()
+
     if '--no-gui' in sys.argv:
         c = Client(); c.start()
         print(f"配对码: {c.token}"); print("按 Ctrl+C 退出")
@@ -652,7 +771,6 @@ def main():
             while True: time.sleep(1)
         except KeyboardInterrupt: c.stop()
     elif '--scan' in sys.argv:
-        # 命令行模式：仅扫描打印机（诊断用）
         printers = list_printers()
         if printers:
             print(f"检测到 {len(printers)} 台打印机:")
@@ -660,10 +778,35 @@ def main():
                 print(f"  - {p}")
         else:
             print("未检测到打印机")
-            print("请检查: 1) Print Spooler 服务是否运行")
-            print("        2) 是否安装了打印机驱动")
     else:
         App().run()
+
+def _check_single_instance():
+    """防止同时跑多个客户端"""
+    import ctypes as _ct2
+    _ct2.windll.kernel32.CreateMutexA(None, False, b"PrintRelayClient_SingleInstance_v4")
+    if _ct2.windll.kernel32.GetLastError() == 183:
+        _ct2.windll.user32.MessageBoxA(0,
+            b"Print Relay is already running.\nPlease check the notification area.",
+            b"Print Relay", 0x40)
+        sys.exit(0)
+
+def _install_autostart():
+    import winreg
+    exe = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+        r'Software\Microsoft\Windows\CurrentVersion\Run', 0, winreg.KEY_SET_VALUE)
+    winreg.SetValueEx(key, 'PrintRelay', 0, winreg.REG_SZ, f'\"{exe}\" --startup')
+    winreg.CloseKey(key)
+
+def _uninstall_autostart():
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+            r'Software\Microsoft\Windows\CurrentVersion\Run', 0, winreg.KEY_SET_VALUE)
+        winreg.DeleteValue(key, 'PrintRelay')
+        winreg.CloseKey(key)
+    except: pass
 
 if __name__ == '__main__':
     main()
