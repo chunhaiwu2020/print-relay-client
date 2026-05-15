@@ -722,15 +722,18 @@ class App:
             sec = f'printer.{key}'
             cfg.add_section(sec)
             cfg.set(sec, 'name', printer)
-            cfg.set(sec, 'template', f'templates/{key}.json')
             if key == 'kitchen':
+                cut = st['cut_var'].get()
+                cfg.set(sec, 'template', f'templates/kitchen_item.json' if cut else f'templates/kitchen.json')
                 cfg.set(sec, 'mode', 'per_item')
-                cfg.set(sec, 'cut_per_item', 'true' if st['cut_var'].get() else 'false')
+                cfg.set(sec, 'cut_per_item', 'true' if cut else 'false')
                 cfg.set(sec, 'feed_lines', '4')
             elif key == 'cashier':
+                cfg.set(sec, 'template', 'templates/cashier.json')
                 cfg.set(sec, 'mode', 'receipt')
                 cfg.set(sec, 'feed_lines', '4')
             elif key == 'bar':
+                cfg.set(sec, 'template', 'templates/bar.json')
                 cfg.set(sec, 'mode', 'per_item')
                 cfg.set(sec, 'station_filter', 'drinks')
                 cfg.set(sec, 'feed_lines', '2')
@@ -785,7 +788,16 @@ class App:
                 {"hr": "="}
             ]
         }
-        for name, data in [('kitchen', kitchen), ('cashier', cashier), ('bar', bar)]:
+        kitchen_item = {
+            "width": 42,
+            "lines": [
+                {"text": "MESA {{table_id}}", "align": "left", "size": "xl", "bold": True},
+                {"text": "{{printed_at}}", "align": "center"},
+                {"hr": "-"},
+                {"repeat": "items", "text": "{{qty}} x {{item_code}} {{name}}", "align": "left", "size": "xl", "bold": True}
+            ]
+        }
+        for name, data in [('kitchen', kitchen), ('kitchen_item', kitchen_item), ('cashier', cashier), ('bar', bar)]:
             p = TEMPLATES_DIR / f'{name}.json'
             with open(p, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
