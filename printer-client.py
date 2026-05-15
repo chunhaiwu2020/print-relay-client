@@ -538,7 +538,7 @@ class App:
 
         self.root = tk.Tk()
         self.root.title(f"Print Relay - {CLIENT_NAME}")
-        self.root.geometry("460x440")
+        self.root.geometry("460x540")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
@@ -584,19 +584,35 @@ class App:
         self.copy_btn.pack(side=t.LEFT)
         tt.Label(tf, text="将此配对码填入控制面板完成配对", foreground='#999', font=('Microsoft YaHei', 9)).pack(pady=(8,0))
 
-        # 打印机区域
-        pf = tt.LabelFrame(self.root, text="打印机", padding=12)
+        # 打印配置区（厨房/收银/吧台）
+        pf = tt.LabelFrame(self.root, text="打印配置", padding=12)
         pf.pack(fill=t.X, padx=16, pady=(8,4))
 
-        btn_row = tt.Frame(pf)
-        btn_row.pack(fill=t.X)
-        self.scan_btn = tt.Button(btn_row, text="重新扫描打印机", command=self._scan_and_show)
-        self.scan_btn.pack(side=t.LEFT)
-        self.tpl_btn = tt.Button(btn_row, text="编辑模板", command=self._edit_template)
-        self.tpl_btn.pack(side=t.LEFT, padx=(8,0))
+        self.stations = {}      # {key: {'var': tk.IntVar, 'combo': ttk.Combobox}}
+        self.printers_list = []  # 缓存扫描结果
 
-        self.printer_lbl = tt.Label(pf, text="尚未扫描", foreground='#999', font=('Microsoft YaHei', 9))
-        self.printer_lbl.pack(pady=(6,0))
+        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台')]:
+            row = tt.Frame(pf)
+            row.pack(fill=t.X, pady=(0,3))
+            v = t.IntVar(value=1 if key != 'bar' else 0)
+            cb = tt.Checkbutton(row, text=label, variable=v,
+                                command=lambda k=key: self._on_check_changed(k))
+            cb.pack(side=t.LEFT)
+            combo = ttk.Combobox(row, state='readonly', width=32)
+            combo.pack(side=t.LEFT, padx=(8,0))
+            self.stations[key] = {'var': v, 'combo': combo}
+            if key == 'bar':
+                combo.config(state='disabled')
+
+        btn_row = tt.Frame(pf)
+        btn_row.pack(fill=t.X, pady=(8,0))
+        self.save_btn = tt.Button(btn_row, text="💾 保存配置", command=self._save_config)
+        self.save_btn.pack(side=t.LEFT)
+        self.scan_btn = tt.Button(btn_row, text="🔄 重新扫描", command=self._scan_and_show)
+        self.scan_btn.pack(side=t.LEFT, padx=(8,0))
+
+        # 加载已有 config.ini
+        self._load_existing_config()
 
         # 日志
         lf = tt.LabelFrame(self.root, text="日志", padding=8)
@@ -605,24 +621,148 @@ class App:
         self.log_txt.pack(fill=t.BOTH, expand=True)
 
     def _scan_and_show(self):
-        """扫描打印机并更新界面"""
+        """扫描打印机并更新下拉"""
         self._log("正在扫描打印机...")
         self.scan_btn.config(state='disabled', text="扫描中...")
-        # 在后台线程扫描，避免 UI 卡顿
         def do_scan():
             printers = self.client.scan_printers()
             self.root.after(0, lambda: self._on_scan_done(printers))
         threading.Thread(target=do_scan, daemon=True).start()
 
     def _on_scan_done(self, printers):
-        self.scan_btn.config(state='normal', text="重新扫描打印机")
+        self.scan_btn.config(state='normal', text="🔄 重新扫描")
+        self.printers_list = printers
         if printers:
-            names = ', '.join(printers)
-            self.printer_lbl.config(text=f"已检测: {names}", foreground='#2e7d32')
-            self._log(f"检测到 {len(printers)} 台打印机: {names}")
+            self._log(f"检测到 {len(printers)} 台打印机: {', '.join(printers)}")
+            self._refresh_dropdowns(printers)
         else:
-            self.printer_lbl.config(text="未检测到打印机！请检查: 1) 打印后台服务 2) 驱动已安装", foreground='#c62828')
-            self._log("未检测到打印机！")
+            self._log("未检测到打印机！请检查打印后台服务和驱动")
+
+    def _refresh_dropdowns(self, printers):
+        """刷新所有勾选站点的打印机下拉"""
+        opts = printers or self.printers_list or []
+        default = opts[0] if opts else ''
+        for key, st in self.stations.items():
+            combo = st['combo']
+            combo['values'] = opts
+            cur = combo.get()
+            if not cur or cur not in opts:
+                combo.set(default if default else '')
+
+    def _on_check_changed(self, key):
+        """勾选/取消勾选时切换下拉状态"""
+        st = self.stations[key]
+        combo = st['combo']
+        if st['var'].get():
+            combo.config(state='readonly')
+            if not combo.get() and self.printers_list:
+                combo.set(self.printers_list[0])
+        else:
+            combo.config(state='disabled')
+            combo.set('')
+
+    def _load_existing_config(self):
+        """读取已有 config.ini 预填选项"""
+        cfg = self.client.config
+        if not cfg.sections():
+            return
+        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台')]:
+            sec = f'printer.{key}'
+            if cfg.has_section(sec):
+                name = cfg.get(sec, 'name', fallback='')
+                st = self.stations[key]
+                st['var'].set(1)
+                if name:
+                    st['combo'].set(name)
+                    st['combo'].config(state='readonly')
+
+    def _save_config(self):
+        """生成 config.ini 并写入内置模板"""
+        from configparser import ConfigParser
+
+        cfg = ConfigParser()
+        cfg.optionxform = str  # 保留大小写
+        built = []
+
+        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台')]:
+            st = self.stations[key]
+            if not st['var'].get():
+                continue
+            printer = st['combo'].get()
+            if not printer:
+                self._log(f"❌ {label} 未选择打印机，跳过")
+                continue
+            sec = f'printer.{key}'
+            cfg.add_section(sec)
+            cfg.set(sec, 'name', printer)
+            cfg.set(sec, 'template', f'templates/{key}.json')
+            if key == 'kitchen':
+                cfg.set(sec, 'mode', 'per_item')
+                cfg.set(sec, 'cut_per_item', 'true')
+                cfg.set(sec, 'feed_lines', '4')
+            elif key == 'cashier':
+                cfg.set(sec, 'mode', 'receipt')
+                cfg.set(sec, 'feed_lines', '4')
+            elif key == 'bar':
+                cfg.set(sec, 'mode', 'per_item')
+                cfg.set(sec, 'station_filter', 'drinks')
+                cfg.set(sec, 'cut_per_item', 'true')
+                cfg.set(sec, 'feed_lines', '2')
+            built.append(label)
+
+        if not built:
+            self._log("❌ 没有勾选任何站点")
+            return
+
+        # 写 config.ini
+        with open(INI_FILE, 'w', encoding='utf-8') as f:
+            cfg.write(f)
+
+        # 写内置模板
+        TEMPLATES_DIR.mkdir(exist_ok=True)
+        self._write_builtin_templates()
+
+        # 重新加载配置
+        self.client.config = load_config()
+        self._log(f"✅ 配置已保存: {', '.join(built)}")
+
+    def _write_builtin_templates(self):
+        """写入 3 套内置 JSON 模板"""
+        kitchen = {
+            "width": 48,
+            "lines": [
+                {"text": "{{restaurant_name}}", "align": "center", "size": "wide", "bold": True},
+                {"text": "Tisch {{table}}  #{{id}}", "align": "center", "bold": True},
+                {"hr": "="},
+                {"repeat": "items", "text": "{{qty}}x {{name}}", "size": "wide"},
+                {"hr": "="}
+            ]
+        }
+        cashier = {
+            "width": 48,
+            "lines": [
+                {"text": "{{restaurant_name}}", "align": "center", "size": "wide", "bold": True},
+                {"text": "Tisch {{table}}  #{{id}}", "align": "center", "bold": True},
+                {"hr": "="},
+                {"repeat": "items", "left": "{{qty}}x {{name}}", "right": "{{total}} EUR", "bold": True},
+                {"hr": "="},
+                {"text": "TOTAL: {{total_amount}} EUR", "align": "right", "size": "xl", "bold": True}
+            ]
+        }
+        bar = {
+            "width": 48,
+            "lines": [
+                {"text": "{{restaurant_name}} - Bar", "align": "center", "size": "wide", "bold": True},
+                {"text": "Tisch {{table}}  #{{id}}", "align": "center", "bold": True},
+                {"hr": "="},
+                {"repeat": "items", "text": "{{qty}}x {{name}}", "size": "wide"},
+                {"hr": "="}
+            ]
+        }
+        for name, data in [('kitchen', kitchen), ('cashier', cashier), ('bar', bar)]:
+            p = TEMPLATES_DIR / f'{name}.json'
+            with open(p, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
 
     def _on_state(self, state, msg):
         self._log(msg)
@@ -673,17 +813,6 @@ class App:
             self._log("配对码已复制！")
         else:
             self._log(f"复制失败，请手动复制: {token}")
-
-    def _edit_template(self):
-        """打开模板目录或 config.ini"""
-        if TEMPLATES_DIR.exists():
-            os.startfile(str(TEMPLATES_DIR))
-            self._log(f"已打开模板目录: {TEMPLATES_DIR}")
-        elif INI_FILE.exists():
-            os.startfile(str(INI_FILE))
-            self._log(f"已打开配置: {INI_FILE}")
-        else:
-            self._log("未找到模板目录或配置文件")
 
     def _close(self):
         """最小化到通知区域"""
