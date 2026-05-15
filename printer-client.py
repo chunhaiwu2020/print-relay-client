@@ -598,7 +598,7 @@ class App:
             cb = tt.Checkbutton(row, text=label, variable=v,
                                 command=lambda k=key: self._on_check_changed(k))
             cb.pack(side=t.LEFT)
-            combo = ttk.Combobox(row, state='readonly', width=32)
+            combo = tt.Combobox(row, state='readonly', width=32)
             combo.pack(side=t.LEFT, padx=(8,0))
             self.stations[key] = {'var': v, 'combo': combo}
             if key == 'bar':
