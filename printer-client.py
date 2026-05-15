@@ -598,9 +598,16 @@ class App:
             cb = tt.Checkbutton(row, text=label, variable=v,
                                 command=lambda k=key: self._on_check_changed(k))
             cb.pack(side=t.LEFT)
-            combo = tt.Combobox(row, state='readonly', width=32)
+            combo = tt.Combobox(row, state='readonly', width=28)
             combo.pack(side=t.LEFT, padx=(8,0))
-            self.stations[key] = {'var': v, 'combo': combo}
+            # 逐菜切纸仅厨房
+            if key == 'kitchen':
+                cut_var = t.IntVar(value=1)
+                cut_cb = tt.Checkbutton(row, text="逐菜切纸", variable=cut_var)
+                cut_cb.pack(side=t.LEFT, padx=(8,0))
+                self.stations[key] = {'var': v, 'combo': combo, 'cut_var': cut_var, 'cut_cb': cut_cb}
+            else:
+                self.stations[key] = {'var': v, 'combo': combo}
             if key == 'bar':
                 combo.config(state='disabled')
 
@@ -650,15 +657,19 @@ class App:
                 combo.set(default if default else '')
 
     def _on_check_changed(self, key):
-        """勾选/取消勾选时切换下拉状态"""
+        """勾选/取消勾选时切换下拉和切纸状态"""
         st = self.stations[key]
         combo = st['combo']
         if st['var'].get():
             combo.config(state='readonly')
+            if 'cut_cb' in st:
+                st['cut_cb'].config(state='normal')
             if not combo.get() and self.printers_list:
                 combo.set(self.printers_list[0])
         else:
             combo.config(state='disabled')
+            if 'cut_cb' in st:
+                st['cut_cb'].config(state='disabled')
             combo.set('')
 
     def _load_existing_config(self):
@@ -672,6 +683,9 @@ class App:
                 name = cfg.get(sec, 'name', fallback='')
                 st = self.stations[key]
                 st['var'].set(1)
+                if key == 'kitchen':
+                    cut = cfg.getboolean(sec, 'cut_per_item', fallback=True)
+                    st['cut_var'].set(1 if cut else 0)
                 if name:
                     st['combo'].set(name)
                     st['combo'].config(state='readonly')
@@ -698,7 +712,7 @@ class App:
             cfg.set(sec, 'template', f'templates/{key}.json')
             if key == 'kitchen':
                 cfg.set(sec, 'mode', 'per_item')
-                cfg.set(sec, 'cut_per_item', 'true')
+                cfg.set(sec, 'cut_per_item', 'true' if st['cut_var'].get() else 'false')
                 cfg.set(sec, 'feed_lines', '4')
             elif key == 'cashier':
                 cfg.set(sec, 'mode', 'receipt')
@@ -706,7 +720,6 @@ class App:
             elif key == 'bar':
                 cfg.set(sec, 'mode', 'per_item')
                 cfg.set(sec, 'station_filter', 'drinks')
-                cfg.set(sec, 'cut_per_item', 'true')
                 cfg.set(sec, 'feed_lines', '2')
             built.append(label)
 
