@@ -7,7 +7,7 @@
 !define EXE_NAME "PrintRelay-Client.exe"
 
 Name "${APPNAME}"
-OutFile "PrintRelay-Setup-${VERSION}.exe"
+OutFile "SETUP.exe"
 InstallDir "C:\PrintRelay"
 RequestExecutionLevel admin
 Unicode True
