@@ -1,0 +1,76 @@
+; Print Relay Client — Windows 安装包
+; NSIS 3.x 脚本
+
+!define APPNAME "Print Relay"
+!define COMPANYNAME "ThreePeaks"
+!define VERSION "4.4.0"
+!define EXE_NAME "PrintRelay-Client.exe"
+
+Name "${APPNAME}"
+OutFile "PrintRelay-Setup-${VERSION}.exe"
+InstallDir "C:\PrintRelay"
+RequestExecutionLevel admin
+Unicode True
+SetCompressor /SOLID lzma
+
+; ── 安装页 ──
+Page directory
+Page instfiles
+
+; ── 卸载页 ──
+UninstPage uninstConfirm
+UninstPage instfiles
+
+Section "Install"
+    SetOutPath "$INSTDIR"
+
+    ; 主程序
+    File "dist\${EXE_NAME}"
+
+    ; 内置模板
+    CreateDirectory "$INSTDIR\templates"
+    File /r "dist\templates\*.json"
+
+    ; 默认 config.ini（如有）
+    File /nonfatal "dist\config.ini"
+
+    ; ── 桌面快捷方式 ──
+    CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\${EXE_NAME}"
+
+    ; ── 开始菜单 ──
+    CreateDirectory "$SMPROGRAMS\${APPNAME}"
+    CreateShortCut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\${EXE_NAME}"
+    CreateShortCut "$SMPROGRAMS\${APPNAME}\Uninstall.lnk" "$INSTDIR\uninstall.exe"
+
+    ; ── 注册表开机启动 ──
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "PrintRelay" '"$INSTDIR\${EXE_NAME}" --startup'
+
+    ; ── 卸载信息 ──
+    WriteUninstaller "$INSTDIR\uninstall.exe"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayName" "${APPNAME}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "UninstallString" "$INSTDIR\uninstall.exe"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayVersion" "${VERSION}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "Publisher" "${COMPANYNAME}"
+
+    ; ── 安装完毕打开软件 ──
+    Exec '"$INSTDIR\${EXE_NAME}"'
+SectionEnd
+
+Section "Uninstall"
+    ; 删文件
+    Delete "$INSTDIR\${EXE_NAME}"
+    Delete "$INSTDIR\config.ini"
+    RMDir /r "$INSTDIR\templates"
+    Delete "$INSTDIR\uninstall.exe"
+    RMDir "$INSTDIR"
+
+    ; 删快捷方式
+    Delete "$DESKTOP\${APPNAME}.lnk"
+    RMDir /r "$SMPROGRAMS\${APPNAME}"
+
+    ; 删开机启动
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "PrintRelay"
+
+    ; 删卸载信息
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
+SectionEnd
