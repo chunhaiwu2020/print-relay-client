@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Print Relay Server v3 — 多用户版 / Multi-tenant
-用户自主注册(邮箱+密码) → 管理员审核 → 每人独立面板配对自己客户端
+Print Relay Server v3 — Multi-tenant / 多租户
+Landing page with language detection + pure CN/EN panels
 """
 
 import asyncio, json, struct, time, os, secrets, logging, hashlib
@@ -20,10 +20,8 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
                     format='%(asctime)s [%(name)s] %(levelname)s %(message)s')
 log = logging.getLogger('relay')
 
-# ── Persistent state ────────────────────────────────────────
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
-
 ADMIN_TOKEN = "90edba8f0283b2c1"
 
 def _hash_password(password: str) -> str:
@@ -45,51 +43,24 @@ class State:
         self.accounts: dict[str, dict] = {}
         self._migrated = False
         self.load()
-
     def load(self):
         if STATE_FILE.exists():
             try:
                 d = json.loads(STATE_FILE.read_text())
                 if 'accounts' in d:
-                    self.accounts = d['accounts']
-                    self._migrated = True
+                    self.accounts = d['accounts']; self._migrated = True
                 else:
-                    self._migrate(d)
-                log.info(f"已加载: {len(self.accounts)} 账号")
+                    self._init_admin(); a = self.accounts[ADMIN_TOKEN]
+                    a['pairings'] = d.get('pairings', {}); a['routes'] = d.get('routes', []); a['history'] = d.get('history', [])[:50]
+                    self._migrated = True; log.info(f"Migrated: {len(a['pairings'])} pairings")
+                log.info(f"Loaded: {len(self.accounts)} accounts")
             except Exception as e:
-                log.warning(f"加载state失败: {e}, 初始化新状态")
-                self._init_admin()
-        else:
-            self._init_admin()
-            self.save()
-
-    def _migrate(self, d: dict):
-        self._init_admin()
-        admin = self.accounts[ADMIN_TOKEN]
-        admin['pairings'] = d.get('pairings', {})
-        admin['routes'] = d.get('routes', [])
-        admin['history'] = d.get('history', [])[:50]
-        self._migrated = True
-        log.info(f"已迁移旧数据: {len(admin['pairings'])} 配对, {len(admin['routes'])} 路由")
-
+                log.warning(f"Load error: {e}"); self._init_admin()
+        else: self._init_admin(); self.save()
     def _init_admin(self):
-        self.accounts[ADMIN_TOKEN] = {
-            "email": "admin",
-            "password_hash": "",
-            "name": "Admin",
-            "status": "active",
-            "limits": {"max_clients": 999},
-            "pairings": {},
-            "routes": [],
-            "history": [],
-            "created": datetime.now(timezone.utc).isoformat()
-        }
-
+        self.accounts[ADMIN_TOKEN] = {"email":"admin","password_hash":"","name":"Admin","status":"active","limits":{"max_clients":999},"pairings":{},"routes":[],"history":[],"created":datetime.now(timezone.utc).isoformat()}
     def save(self):
-        STATE_FILE.write_text(json.dumps({
-            'accounts': self.accounts,
-            'version': 3
-        }, ensure_ascii=False, indent=2))
+        STATE_FILE.write_text(json.dumps({'accounts':self.accounts,'version':3},ensure_ascii=False,indent=2))
 
 state = State()
 
@@ -97,227 +68,278 @@ state = State()
 main_loop: asyncio.AbstractEventLoop | None = None
 async_lock = asyncio.Lock()
 clients: dict[str, dict] = {}
-
 def run_async(coro):
-    f = asyncio.run_coroutine_threadsafe(coro, main_loop)
-    return f.result(timeout=30)
+    return asyncio.run_coroutine_threadsafe(coro, main_loop).result(timeout=30)
 
-# ── TCP Server (unchanged from v3) ──────────────────────────
+# ── TCP Server ───────────────────────────────────────────────
 async def handle_client(reader, writer):
     peer = writer.get_extra_info('peername')
-    log.info(f"TCP 连接: {peer}")
     try:
         line = await asyncio.wait_for(reader.readline(), timeout=10)
-    except Exception:
-        writer.close(); return
-
+    except: writer.close(); return
     parts = line.decode().strip().split(maxsplit=1)
-    if not parts:
-        writer.close(); return
-
+    if not parts: writer.close(); return
     cmd = parts[0].upper()
-
     if cmd == 'REGISTER' and len(parts) == 2:
-        token = parts[1]
-        found_account = None
-        p = None
+        token = parts[1]; found_account = None; p = None
         with state.lock:
-            for acct_tok, acct in state.accounts.items():
-                if token in acct.get('pairings', {}):
-                    found_account = acct_tok
-                    p = acct['pairings'][token]
-                    break
-
-        if not p:
-            writer.write(b"UNKNOWN_TOKEN\n"); await writer.drain(); writer.close(); return
-        if p.get('type') != 'client':
-            writer.write(b"WRONG_TYPE\n"); await writer.drain(); writer.close(); return
-
+            for atok, acct in state.accounts.items():
+                if token in acct.get('pairings',{}): found_account=atok; p=acct['pairings'][token]; break
+        if not p: writer.write(b"UNKNOWN_TOKEN\n"); await writer.drain(); writer.close(); return
+        if p.get('type') != 'client': writer.write(b"WRONG_TYPE\n"); await writer.drain(); writer.close(); return
         client_name = p['name']
-
-        try:
-            jline = await asyncio.wait_for(reader.readline(), timeout=5)
-            info = json.loads(jline.decode())
-        except Exception:
-            writer.write(b"BAD_JSON\n"); await writer.drain(); writer.close(); return
-
-        width_mm = info.get('paper_width', 80)
-        printers = info.get('printers', ['default'])
-
+        try: jline=await asyncio.wait_for(reader.readline(),timeout=5); info=json.loads(jline.decode())
+        except: writer.write(b"BAD_JSON\n"); await writer.drain(); writer.close(); return
+        width_mm=info.get('paper_width',80); printers=info.get('printers',['default'])
         with state.lock:
-            acct = state.accounts.get(found_account, {})
-            p = acct.get('pairings', {}).get(token, {})
-            status = p.get('status', 'pending')
-            if status != 'approved':
+            acct=state.accounts.get(found_account,{}); p=acct.get('pairings',{}).get(token,{})
+            if p.get('status')!='approved':
                 writer.write(b"PENDING\n"); await writer.drain()
                 while True:
                     await asyncio.sleep(2)
                     with state.lock:
-                        a = state.accounts.get(found_account, {})
-                        pp = a.get('pairings', {}).get(token, {})
-                        if pp.get('status') == 'approved':
-                            break
+                        a=state.accounts.get(found_account,{}); pp=a.get('pairings',{}).get(token,{})
+                        if pp.get('status')=='approved': break
                 writer.write(b"APPROVED\n")
-            else:
-                writer.write(b"APPROVED\n")
-            await writer.drain()
-            p['printers'] = printers
-            p['width_mm'] = width_mm
-            state.save()
-
+            else: writer.write(b"APPROVED\n")
+            await writer.drain(); p['printers']=printers; p['width_mm']=width_mm; state.save()
         async with async_lock:
-            clients[client_name] = {
-                "writer": writer, "token": token, "printers": printers,
-                "width_mm": width_mm,
-                "connected_at": datetime.now(timezone.utc).isoformat(),
-                "account": found_account
-            }
-        log.info(f"客户端上线: {client_name} | 打印机: {printers}")
-
+            clients[client_name]={"writer":writer,"token":token,"printers":printers,"width_mm":width_mm,"connected_at":datetime.now(timezone.utc).isoformat(),"account":found_account}
+        log.info(f"Client online: {client_name} | {printers}")
         try:
-            sock = writer.get_extra_info('socket')
-            if sock:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        except Exception:
-            pass
-
-        async def heartbeat():
+            sock=writer.get_extra_info('socket')
+            if sock: sock.setsockopt(socket.SOL_SOCKET,socket.SO_KEEPALIVE,1)
+        except: pass
+        async def hb():
             while True:
                 await asyncio.sleep(15)
-                try:
-                    writer.write(b'\x00\x00\x00\x00')
-                    await writer.drain()
-                except Exception:
-                    break
-
-        hb_task = asyncio.create_task(heartbeat())
-
+                try: writer.write(b'\x00\x00\x00\x00'); await writer.drain()
+                except: break
+        hbt=asyncio.create_task(hb())
         try:
             while True:
-                ln = await reader.readline()
-                if not ln:
-                    break
-                line = ln.decode().strip()
+                ln=await reader.readline()
+                if not ln: break
+                line=ln.decode().strip()
                 if line.startswith('{'):
                     try:
-                        info = json.loads(line)
+                        info=json.loads(line)
                         if 'printers' in info:
                             with state.lock:
-                                a = state.accounts.get(found_account, {})
-                                pp = a.get('pairings', {}).get(token, {})
-                                pp['printers'] = info['printers']
-                                if 'paper_width' in info:
-                                    pp['width_mm'] = info['paper_width']
+                                a=state.accounts.get(found_account,{}); pp=a.get('pairings',{}).get(token,{})
+                                pp['printers']=info['printers']
+                                if 'paper_width' in info: pp['width_mm']=info['paper_width']
                                 state.save()
-                    except json.JSONDecodeError:
-                        pass
-        except asyncio.CancelledError:
-            pass
+                    except json.JSONDecodeError: pass
+        except asyncio.CancelledError: pass
         finally:
-            hb_task.cancel()
-            async with async_lock:
-                clients.pop(client_name, None)
-            log.info(f"客户端断开: {client_name}")
-            writer.close()
+            hbt.cancel()
+            async with async_lock: clients.pop(client_name,None)
+            log.info(f"Client offline: {client_name}"); writer.close()
         return
-
-    writer.write(b"UNKNOWN_CMD\n"); await writer.drain()
-    writer.close()
+    writer.write(b"UNKNOWN_CMD\n"); await writer.drain(); writer.close()
 
 async def send_to_client(name, data):
-    async with async_lock:
-        info = clients.get(name)
-    if not info:
-        return False
-    w = info["writer"]
-    try:
-        w.write(struct.pack('>I', len(data)) + data)
-        await w.drain()
-        return True
+    async with async_lock: info=clients.get(name)
+    if not info: return False
+    try: info["writer"].write(struct.pack('>I',len(data))+data); await info["writer"].drain(); return True
     except Exception:
-        async with async_lock:
-            clients.pop(name, None)
+        async with async_lock: clients.pop(name,None)
         return False
 
-# ── HTML Pages (中英双语 / Bilingual CN-EN) ─────────────────
+# ── i18n strings ─────────────────────────────────────────────
+T = {
+    "zh": {
+        "title": "Print Relay · 云端打印中继",
+        "hero": "订单直达打印机，零配置云端中继",
+        "sub": "餐厅后厨、收银台、吧台 — 多站自动分发，逐菜切纸，开机即用",
+        "features": ["🔌 一键配对","🖨️ 多站分发","📋 多租户隔离","🔒 邮箱注册","🚀 开机自启","🌍 中英双语"],
+        "cta": "开始使用",
+        "login_btn": "登录",
+        "footer": "© 2026 Print Relay · 简约高效的云端打印方案",
+        "login_title": "登录",
+        "register_title": "注册",
+        "email_ph": "邮箱地址",
+        "password_ph": "密码",
+        "password_hint": "最少6位",
+        "login_action": "登录",
+        "register_action": "注册",
+        "reg_success": "注册成功！等待管理员审核",
+        "panel_title": "面板",
+        "pairings_title": "已配对设备",
+        "routes_title": "打印路由",
+        "test_title": "测试打印",
+        "history_title": "打印历史",
+        "loading": "加载中...",
+        "no_pairings": "暂无配对 — 在上方粘贴 Token 添加",
+        "type_col": "类型",
+        "name_col": "名称",
+        "status_col": "状态",
+        "printer_col": "打印机",
+        "action_col": "操作",
+        "delete_btn": "删除",
+        "pending": "⏳待审",
+        "approved": "✅已批",
+        "rejected": "❌拒绝",
+        "offline": "等待上线",
+        "add_btn": "➕ 添加",
+        "source_label": "订单来源",
+        "client_label": "目标客户端",
+        "printer_label": "打印机",
+        "default_printer": "— 默认 —",
+        "select_source": "— 选择来源 —",
+        "select_client": "— 选择客户端 —",
+        "add_route": "+ 添加",
+        "route_added": "✅ 路由已添加",
+        "route_failed": "❌ 失败",
+        "no_routes": "暂无路由 — 请先添加配对和客户端",
+        "test_route_label": "选择路由",
+        "test_order_label": "订单号",
+        "test_items_label": "菜品 (名称,单价,数量|...)",
+        "send_test": "▶️ 发送",
+        "sent": "✅ 已发送",
+        "select_route_first": "请先配置路由",
+        "history_time": "时间",
+        "history_client": "客户端",
+        "history_printer": "打印机",
+        "history_order": "订单",
+        "no_history": "暂无记录",
+        "token_short": "Token 太短",
+        "limit_reached": "已达客户端上限",
+        "added": "✅ 已添加",
+        "confirm_delete": "确认删除配对？",
+        "select_both": "请选择来源和客户端",
+        "route_not_found": "路由不存在",
+        "server_error": "服务器错误",
+        "clients_label": "客户端",
+        "logout": "退出",
+        "admin_title": "管理员",
+        "admin_pending": "待审核",
+        "admin_all": "全部账号",
+        "admin_email": "邮箱",
+        "admin_name": "名称",
+        "admin_registered": "注册时间",
+        "admin_action": "操作",
+        "admin_status": "状态",
+        "admin_status_pending": "待审",
+        "admin_status_active": "活跃",
+        "admin_status_suspended": "暂停",
+        "approve": "批准",
+        "reject": "拒绝",
+        "suspend": "暂停",
+        "resume": "恢复",
+        "limit_label": "上限",
+        "save": "保存",
+        "updated": "✅ 已更新",
+        "no_pending": "无待审核",
+    },
+    "en": {
+        "title": "Print Relay · Cloud Print Relay",
+        "hero": "Orders to Printer, Zero-Config Cloud Relay",
+        "sub": "Kitchen, Cashier, Bar — Multi-station auto-routing, per-item cutting, plug & play",
+        "features": ["🔌 One-Click Pairing","🖨️ Multi-Station","📋 Multi-Tenant","🔒 Email Signup","🚀 Auto-Start","🌍 CN/EN"],
+        "cta": "Get Started",
+        "login_btn": "Login",
+        "footer": "© 2026 Print Relay · Simple & Efficient Cloud Printing",
+        "login_title": "Login",
+        "register_title": "Register",
+        "email_ph": "Email address",
+        "password_ph": "Password",
+        "password_hint": "Min 6 characters",
+        "login_action": "Login",
+        "register_action": "Register",
+        "reg_success": "Registered! Awaiting admin approval.",
+        "panel_title": "Panel",
+        "pairings_title": "Paired Devices",
+        "routes_title": "Print Routes",
+        "test_title": "Test Print",
+        "history_title": "Print History",
+        "loading": "Loading...",
+        "no_pairings": "No pairings — Paste a token above to add",
+        "type_col": "Type",
+        "name_col": "Name",
+        "status_col": "Status",
+        "printer_col": "Printers",
+        "action_col": "Action",
+        "delete_btn": "Del",
+        "pending": "⏳Pending",
+        "approved": "✅Approved",
+        "rejected": "❌Rejected",
+        "offline": "Offline",
+        "add_btn": "➕ Add",
+        "source_label": "Source",
+        "client_label": "Client",
+        "printer_label": "Printer",
+        "default_printer": "— Default —",
+        "select_source": "— Select Source —",
+        "select_client": "— Select Client —",
+        "add_route": "+ Add Route",
+        "route_added": "✅ Route added",
+        "route_failed": "❌ Failed",
+        "no_routes": "No routes — Add pairings first",
+        "test_route_label": "Select Route",
+        "test_order_label": "Order #",
+        "test_items_label": "Items (name,price,qty|...)",
+        "send_test": "▶️ Send",
+        "sent": "✅ Sent",
+        "select_route_first": "Configure routes first",
+        "history_time": "Time",
+        "history_client": "Client",
+        "history_printer": "Printer",
+        "history_order": "Order",
+        "no_history": "No records",
+        "token_short": "Token too short",
+        "limit_reached": "Client limit reached",
+        "added": "✅ Added",
+        "confirm_delete": "Confirm delete pairing?",
+        "select_both": "Select source and client",
+        "route_not_found": "Route not found",
+        "server_error": "Server error",
+        "clients_label": "Clients",
+        "logout": "Logout",
+        "admin_title": "Admin",
+        "admin_pending": "Pending Approval",
+        "admin_all": "All Accounts",
+        "admin_email": "Email",
+        "admin_name": "Name",
+        "admin_registered": "Registered",
+        "admin_action": "Action",
+        "admin_status": "Status",
+        "admin_status_pending": "Pending",
+        "admin_status_active": "Active",
+        "admin_status_suspended": "Suspended",
+        "approve": "Approve",
+        "reject": "Reject",
+        "suspend": "Suspend",
+        "resume": "Resume",
+        "limit_label": "Limit",
+        "save": "Save",
+        "updated": "✅ Updated",
+        "no_pending": "No pending",
+    }
+}
 
-LOGIN_PAGE = """<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Print Relay</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font:14px/1.6 system-ui,'Microsoft YaHei',sans-serif;background:#f0f2f5;color:#222;display:flex;justify-content:center;align-items:center;min-height:100vh}
-.card{background:#fff;border-radius:12px;padding:36px;box-shadow:0 2px 12px rgba(0,0,0,.08);max-width:400px;width:100%}
-h1{font-size:22px;text-align:center;margin-bottom:4px}.sub{text-align:center;color:#888;font-size:13px;margin-bottom:24px}
-label{display:block;font-size:12px;color:#666;margin-bottom:4px}
-input{width:100%;padding:10px 12px;border:1px solid #ccc;border-radius:8px;font-size:14px;margin-bottom:12px}
-input:focus{outline:none;border-color:#1976d2}
-.btn{width:100%;padding:11px;background:#1976d2;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:500}
-.btn:hover{background:#1565c0}
-.btn.ghost{background:none;color:#1976d2;margin-top:8px;font-size:13px}
-.msg{font-size:12px;text-align:center;margin-top:8px}.msg.err{color:#c62828}.msg.ok{color:#2e7d32}
-.tabs{display:flex;gap:0;margin-bottom:20px;border-bottom:2px solid #eee}
-.tab{flex:1;text-align:center;padding:10px;cursor:pointer;font-weight:500;color:#888;border-bottom:2px solid transparent;margin-bottom:-2px}
-.tab.active{color:#1976d2;border-bottom-color:#1976d2}
-</style></head><body>
-<div class="card">
-<h1>🖨️ Print Relay</h1>
-<div class="sub">打印中继 · Cloud Print Relay</div>
-<div class="tabs">
-  <div class="tab active" onclick="showTab('login')">登录 Login</div>
-  <div class="tab" onclick="showTab('register')">注册 Register</div>
-</div>
-<div id="form-login">
-  <label>邮箱 Email</label><input id="l_email" type="email" placeholder="chef@example.com">
-  <label>密码 Password</label><input id="l_password" type="password" placeholder="••••••">
-  <button class="btn" onclick="doLogin()">登录 Login</button>
-</div>
-<div id="form-register" style="display:none">
-  <label>邮箱 Email</label><input id="r_email" type="email" placeholder="chef@example.com">
-  <label>密码 Password</label><input id="r_password" type="password" placeholder="最少6位 / min 6 chars">
-  <button class="btn" onclick="doRegister()">注册 Register</button>
-</div>
-<div id="msg" class="msg"></div>
-</div>
-<script>
-function showTab(t){
- document.querySelectorAll('.tab').forEach((e,i)=>e.classList.toggle('active',i==(t==='login'?0:1)));
- document.getElementById('form-login').style.display=t==='login'?'block':'none';
- document.getElementById('form-register').style.display=t==='register'?'block':'none';
- document.getElementById('msg').textContent='';
-}
-async function doLogin(){
- let e=document.getElementById('l_email').value.trim();
- let p=document.getElementById('l_password').value;
- if(!e||!p){msg('请输入邮箱和密码 / Enter email and password','err');return}
- let r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:e,password:p})});
- let d=await r.json();
- if(r.ok){msg('登录成功 / Login OK, redirecting...','ok');setTimeout(()=>location.href='/panel?token='+d.token,500)}
- else msg(d.error||'登录失败 / Login failed','err');
-}
-async function doRegister(){
- let e=document.getElementById('r_email').value.trim();
- let p=document.getElementById('r_password').value;
- if(!e||p.length<6){msg('密码至少6位 / Password min 6 chars','err');return}
- let r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:e,password:p})});
- let d=await r.json();
- if(r.ok) msg('注册成功！等待管理员审核 / Registered! Awaiting admin approval','ok');
- else msg(d.error||'注册失败 / Registration failed','err');
-}
-function msg(t,c){ let m=document.getElementById('msg'); m.textContent=t; m.className='msg '+c }
-</script>
-</body></html>"""
+def _page_css():
+    return """*{margin:0;padding:0;box-sizing:border-box}
+body{font:14px/1.6 system-ui,'Microsoft YaHei',sans-serif;background:#f0f2f5;color:#222}
+.header{background:#fff;border-bottom:1px solid #eee;padding:0 24px;display:flex;align-items:center;justify-content:space-between;height:56px}
+.header .logo{font-size:18px;font-weight:700}.header .logo span{color:#1976d2}
+.header .lang a{color:#888;text-decoration:none;font-size:13px;margin-left:12px}
+.header .lang a.active{color:#1976d2;font-weight:600}
+.hero{text-align:center;padding:80px 24px 60px;max-width:700px;margin:0 auto}
+.hero h1{font-size:32px;margin-bottom:12px}.hero h1 span{color:#1976d2}
+.hero p{color:#666;font-size:16px;margin-bottom:32px}
+.hero .cta a{display:inline-block;padding:14px 40px;background:#1976d2;color:#fff;border-radius:8px;text-decoration:none;font-size:16px;font-weight:600;margin:0 8px}
+.hero .cta a.ghost{background:#fff;color:#1976d2;border:2px solid #1976d2}
+.features{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;max-width:800px;margin:0 auto 60px;padding:0 24px}
+.features .feat{background:#fff;border-radius:10px;padding:24px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.04);font-size:14px;font-weight:500}
+.footer{text-align:center;color:#999;font-size:12px;padding:32px 0}
 
-PANEL_HTML = """<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Print Relay · 面板 Panel</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font:14px/1.6 system-ui,'Microsoft YaHei',sans-serif;background:#f0f2f5;color:#222;padding:20px;max-width:960px;margin:0 auto}
-h1{font-size:22px}.sub{color:#888;font-size:12px;margin-bottom:18px}
+/* Panel pages */
+.container{max-width:1100px;margin:0 auto;padding:20px}
 .card{background:#fff;border-radius:10px;padding:18px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-.card h2{font-size:15px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}.col{flex:1;min-width:160px}
+.card h2{font-size:15px;margin-bottom:10px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}.col{flex:1;min-width:180px}
 .col label{display:block;font-size:12px;color:#666;margin-bottom:3px}
 input,select{width:100%;padding:7px 10px;border:1px solid #ccc;border-radius:6px;font-size:13px}
 input:focus,select:focus{outline:none;border-color:#1976d2}
@@ -326,419 +348,363 @@ input:focus,select:focus{outline:none;border-color:#1976d2}
 .btn.success{background:#2e7d32;color:#fff}.btn.success:hover{background:#1b5e20}
 .btn.danger{background:#c62828;color:#fff}.btn.danger:hover{background:#b71c1c}
 .btn.small{padding:4px 10px;font-size:11px}
+.btn.approve{background:#2e7d32;color:#fff}.btn.reject{background:#e65100;color:#fff}.btn.suspend{background:#c62828;color:#fff}.btn.activate{background:#1976d2;color:#fff}
 .tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px}
 .tag.woo{background:#e3f2fd;color:#1565c0}.tag.client{background:#e8f5e9;color:#2e7d32}
-.tag.pending{background:#fff3e0;color:#e65100}
+.tag.pending{background:#fff3e0;color:#e65100}.tag.active{background:#e8f5e9;color:#2e7d32}.tag.suspended{background:#ffebee;color:#c62828}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{padding:7px 10px;text-align:left;border-bottom:1px solid #eee}
 th{color:#888;font-weight:500;font-size:11px}
 .msg{font-size:12px;margin-top:4px}.msg.ok{color:#2e7d32}.msg.err{color:#c62828}
 .empty{color:#999;font-size:13px}
-</style></head><body>
-<h1>🖨️ Print Relay <span style="font-size:14px;color:#888" id="acct_name"></span></h1>
-<div class="sub"><span id="acct_email"></span> · 客户端 Client <span id="acct_clients">0/0</span></div>
+.sub{color:#888;font-size:12px;margin-bottom:18px}
+.limits input{width:40px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;font-size:12px;text-align:center}
+.login-card{background:#fff;border-radius:12px;padding:36px;box-shadow:0 2px 12px rgba(0,0,0,.08);max-width:400px;width:100%;margin:80px auto}
+.login-card h1{font-size:22px;text-align:center;margin-bottom:4px}
+.login-card .sub{text-align:center;color:#888;font-size:13px;margin-bottom:24px}
+.login-card label{display:block;font-size:12px;color:#666;margin-bottom:4px}
+.login-card input{width:100%;padding:10px 12px;border:1px solid #ccc;border-radius:8px;font-size:14px;margin-bottom:12px}
+.login-card input:focus{outline:none;border-color:#1976d2}
+.login-card .btn{width:100%;padding:11px;background:#1976d2;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;font-weight:500;margin-top:4px}
+.login-card .btn:hover{background:#1565c0}
+.tabs{display:flex;gap:0;margin-bottom:20px;border-bottom:2px solid #eee}
+.tab{flex:1;text-align:center;padding:10px;cursor:pointer;font-weight:500;color:#888;border-bottom:2px solid transparent;margin-bottom:-2px}
+.tab.active{color:#1976d2;border-bottom-color:#1976d2}
+"""
 
-<!-- ═══ 配对 Paired Devices ═══ -->
-<div class="card">
-<h2>📡 已配对设备 Paired Devices</h2>
-<div id="pairings" class="empty">加载中 / Loading...</div>
-<div class="row" style="margin-top:12px;align-items:stretch">
-  <div class="col"><input id="new_tok" placeholder="粘贴 Token / Paste Token"></div>
-  <div class="col" style="min-width:100px">
-    <select id="new_type"><option value="woo">🛒 WooCommerce</option><option value="shopify">🛍️ Shopify</option><option value="pos">🏪 POS</option><option value="custom">🔧 Custom API</option><option value="client">💻 客户端 Client</option></select>
-  </div>
-  <div class="col"><input id="new_name" placeholder="名称 Name (e.g. thecarte.eu)"></div>
-  <div><button class="btn primary" onclick="addPairing()" style="height:37px">➕ 添加 Add</button></div>
-</div>
-<div id="pair_msg" class="msg"></div>
-</div>
+def _lang_nav(lang):
+    zh_cls = "active" if lang == "zh" else ""
+    en_cls = "active" if lang == "en" else ""
+    return f'<div class="lang"><a href="?lang=zh" class="{zh_cls}" onclick="setLang(\'zh\')">中文</a><a href="?lang=en" class="{en_cls}" onclick="setLang(\'en\')">EN</a></div>'
 
-<!-- ═══ 路由 Routes ═══ -->
-<div class="card">
-<h2>🔀 打印路由 Print Routes</h2>
-<div id="routes" class="empty">加载中 / Loading...</div>
-<div class="row" style="margin-top:12px">
-  <div class="col"><label>订单来源 Source</label><select id="rt_woo"><option value="">— 先添加配对 / Add pairing first —</option></select></div>
-  <div class="col"><label>目标客户端 Client</label><select id="rt_client"><option value="">— 先添加客户端 / Add client first —</option></select></div>
-  <div class="col"><label>打印机 Printer</label><select id="rt_printer"><option value="">— 默认 Default —</option></select></div>
-  <div><label>&nbsp;</label><button class="btn success" onclick="addRoute()">+ 添加 Add</button></div>
-</div>
-<div id="route_msg" class="msg"></div>
-</div>
+def _lang_script():
+    return """<script>
+function setLang(l){localStorage.setItem('pr_lang',l);location.search='?lang='+l}
+(function(){
+ let l=new URLSearchParams(location.search).get('lang')||localStorage.getItem('pr_lang');
+ if(!l){l=(navigator.language||'').startsWith('zh')?'zh':'en';localStorage.setItem('pr_lang',l)}
+ if(!location.search.includes('lang=')){let s=location.search;location.search=(s?s+'&':'')+'lang='+l}
+})()</script>"""
 
-<!-- ═══ 测试打印 Test Print ═══ -->
-<div class="card">
-<h2>🧪 测试打印 Test Print</h2>
-<div class="row">
-  <div class="col"><label>选择路由 Route</label><select id="test_route"><option value="">— 请先配置路由 / Configure route first —</option></select></div>
-  <div class="col"><label>订单号 Order#</label><input id="test_order" value="TEST-001"></div>
-  <div class="col"><label>菜品 Items (name,price,qty|...)</label><input id="test_items" value="Peking Suppe,3.50,2|Frühlingsrolle,4.50,1"></div>
-  <div><label>&nbsp;</label><button class="btn primary" onclick="sendTest()">▶️ 发送 Send</button></div>
+def landing_page(lang):
+    t = T[lang]; css = _page_css()
+    return f"""<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{t['title']}</title><style>{css}</style></head><body>
+<div class="header"><div class="logo">🖨️ <span>Print Relay</span></div>{_lang_nav(lang)}</div>
+<div class="hero">
+<h1>{t['hero']}</h1>
+<p>{t['sub']}</p>
+<div class="cta"><a href="/login?lang={lang}">{t['cta']}</a><a href="/login?lang={lang}" class="ghost">{t['login_btn']}</a></div>
 </div>
-<div id="test_msg" class="msg"></div>
-</div>
+<div class="features">{''.join(f'<div class="feat">{f}</div>' for f in t['features'])}</div>
+<div class="footer">{t['footer']}</div>
+{_lang_script()}
+</body></html>"""
 
-<!-- ═══ 打印历史 History ═══ -->
-<div class="card">
-<h2>📋 打印历史 Print History</h2>
-<div id="history" class="empty">加载中 / Loading...</div>
+def login_page(lang):
+    t = T[lang]; css = _page_css()
+    return f"""<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Relay · {t['login_title']}</title><style>{css}</style></head><body>
+<div class="header"><div class="logo">🖨️ <span>Print Relay</span></div>{_lang_nav(lang)}</div>
+<div class="login-card">
+<h1>🖨️ Print Relay</h1>
+<div class="sub">{t['sub']}</div>
+<div class="tabs"><div class="tab active" onclick="showTab('login')">{t['login_title']}</div><div class="tab" onclick="showTab('register')">{t['register_title']}</div></div>
+<div id="form-login">
+<label>{t['email_ph']}</label><input id="l_email" type="email">
+<label>{t['password_ph']}</label><input id="l_password" type="password">
+<button class="btn" onclick="doLogin()">{t['login_action']}</button>
 </div>
-
+<div id="form-register" style="display:none">
+<label>{t['email_ph']}</label><input id="r_email" type="email">
+<label>{t['password_ph']}</label><input id="r_password" type="password" placeholder="{t['password_hint']}">
+<button class="btn" onclick="doRegister()">{t['register_action']}</button>
+</div>
+<div id="msg" class="msg"></div>
+</div>
+{_lang_script()}
 <script>
-const T = new URLSearchParams(location.search).get('token') || '';
-if(!T){location.href='/login';}
+function showTab(t){{
+ document.querySelectorAll('.tab').forEach((e,i)=>e.classList.toggle('active',i==(t==='login'?0:1)));
+ document.getElementById('form-login').style.display=t==='login'?'block':'none';
+ document.getElementById('form-register').style.display=t==='register'?'block':'none';
+ document.getElementById('msg').textContent='';
+}}
+async function doLogin(){{
+ let e=document.getElementById('l_email').value.trim(),p=document.getElementById('l_password').value;
+ if(!e||!p){{msg('{t["token_short"]}','err');return}}
+ let r=await fetch('/api/login',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:e,password:p}})}});
+ let d=await r.json();
+ if(r.ok){{msg('OK, redirecting...','ok');setTimeout(()=>location.href='/panel?token='+d.token+'&lang='+(new URLSearchParams(location.search).get('lang')||'en'),500)}}
+ else msg(d.error||'Failed','err');
+}}
+async function doRegister(){{
+ let e=document.getElementById('r_email').value.trim(),p=document.getElementById('r_password').value;
+ if(!e||p.length<6){{msg('{t["password_hint"]}','err');return}}
+ let r=await fetch('/api/register',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email:e,password:p}})}});
+ let d=await r.json();
+ if(r.ok) msg('{t["reg_success"]}','ok');
+ else msg(d.error||'Failed','err');
+}}
+function msg(t,c){{let m=document.getElementById('msg');m.textContent=t;m.className='msg '+c}}
+</script></body></html>"""
 
-async function api(p,o={}){
- let sep = p.includes('?')?'&':'?';
- let r = await fetch(p+sep+'token='+T,o);
- return r.json();
-}
+def panel_page(lang, token):
+    t = T[lang]; css = _page_css()
+    return f"""<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Relay · {t['panel_title']}</title><style>{css}</style></head><body>
+<div class="header"><div class="logo">🖨️ <span>Print Relay</span></div>{_lang_nav(lang)}</div>
+<div class="container">
+<h1>🖨️ Print Relay <span style="font-size:14px;color:#888" id="acct_name"></span></h1>
+<div class="sub"><span id="acct_email"></span> · {t['clients_label']} <span id="acct_clients">0/0</span></div>
 
-async function refresh(){
- let d = await api('/api/pairings');
- document.getElementById('acct_name').textContent = d.account_name||'';
- document.getElementById('acct_email').textContent = d.account_email||'';
- document.getElementById('acct_clients').textContent = (d.client_count||0)+'/'+(d.max_clients||3);
+<div class="card"><h2>📡 {t['pairings_title']}</h2>
+<div id="pairings" class="empty">{t['loading']}</div>
+<div class="row" style="margin-top:12px;align-items:stretch">
+<div class="col"><input id="new_tok" placeholder="Paste Token"></div>
+<div class="col" style="min-width:100px"><select id="new_type"><option value="woo">🛒 WooCommerce</option><option value="shopify">🛍️ Shopify</option><option value="pos">🏪 POS</option><option value="custom">🔧 Custom API</option><option value="client">💻 Client</option></select></div>
+<div class="col"><input id="new_name" placeholder="Name"></div>
+<div><button class="btn primary" onclick="addPairing()" style="height:37px">{t['add_btn']}</button></div>
+</div><div id="pair_msg" class="msg"></div></div>
 
- let pairings = d.pairings||{};
+<div class="card"><h2>🔀 {t['routes_title']}</h2>
+<div id="routes" class="empty">{t['loading']}</div>
+<div class="row" style="margin-top:12px">
+<div class="col"><label>{t['source_label']}</label><select id="rt_woo"><option value="">{t['select_source']}</option></select></div>
+<div class="col"><label>{t['client_label']}</label><select id="rt_client"><option value="">{t['select_client']}</option></select></div>
+<div class="col"><label>{t['printer_label']}</label><select id="rt_printer"><option value="">{t['default_printer']}</option></select></div>
+<div><label>&nbsp;</label><button class="btn success" onclick="addRoute()">{t['add_route']}</button></div>
+</div><div id="route_msg" class="msg"></div></div>
+
+<div class="card"><h2>🧪 {t['test_title']}</h2>
+<div class="row">
+<div class="col"><label>{t['test_route_label']}</label><select id="test_route"><option value="">— {t['select_route_first']} —</option></select></div>
+<div class="col"><label>{t['test_order_label']}</label><input id="test_order" value="TEST-001"></div>
+<div class="col"><label>{t['test_items_label']}</label><input id="test_items" value="Peking Suppe,3.50,2|Frühlingsrolle,4.50,1"></div>
+<div><label>&nbsp;</label><button class="btn primary" onclick="sendTest()">{t['send_test']}</button></div>
+</div><div id="test_msg" class="msg"></div></div>
+
+<div class="card"><h2>📋 {t['history_title']}</h2><div id="history" class="empty">{t['loading']}</div></div>
+</div>
+{_lang_script()}
+<script>
+const T='{token}';
+async function api(p,o={{}}){{let s=p.includes('?')?'&':'?';let r=await fetch(p+s+'token='+T,o);return r.json()}}
+async function refresh(){{
+ let d=await api('/api/pairings');
+ document.getElementById('acct_name').textContent=d.account_name||'';
+ document.getElementById('acct_email').textContent=d.account_email||'';
+ document.getElementById('acct_clients').textContent=(d.client_count||0)+'/'+(d.max_clients||3);
+ let pairings=d.pairings||{{}};
  let ph='';
- if(Object.keys(pairings).length===0){
-  ph='<span class="empty">暂无配对 No pairings — 在上方粘贴 Token 添加 / Paste token above</span>';
- }else{
-  ph='<table><tr><th>类型 Type</th><th>名称 Name</th><th>Token</th><th>状态 Status</th><th>打印机 Printers</th><th>操作 Action</th></tr>';
-  for(let [tok,p] of Object.entries(pairings)){
-   let labels={woo:'WooCommerce',shopify:'Shopify',pos:'POS',custom:'Custom API',client:'Client'};
-   let icons={woo:'🛒',shopify:'🛍️',pos:'🏪',custom:'🔧',client:'💻'};
-   let cls=p.type==='client'?'client':'woo';
-   let icon=icons[p.type]||'📡';
-   let statusLabel={'pending':'⏳待审 Pending','approved':'✅已批 Approved','rejected':'❌拒绝 Rejected'}[p.status]||p.status;
-   let printers=p.printers?p.printers.join(', '):(p.type==='client'?'等待上线 Offline':'—');
-   ph+=`<tr><td><span class="tag ${cls}">${icon} ${labels[p.type]||p.type}</span></td><td>${p.name}</td><td><code>${tok}</code></td><td>${statusLabel}</td><td style="font-size:12px;color:#666">${printers}</td><td><button class="btn danger small" onclick="delPairing('${tok}')">删除 Del</button></td></tr>`;
-  }
+ if(Object.keys(pairings).length===0){{
+  ph='<span class="empty">{t["no_pairings"]}</span>';
+ }}else{{
+  ph='<table><tr><th>{t["type_col"]}</th><th>{t["name_col"]}</th><th>Token</th><th>{t["status_col"]}</th><th>{t["printer_col"]}</th><th>{t["action_col"]}</th></tr>';
+  for(let [tok,p] of Object.entries(pairings)){{
+   let labels={{woo:'WooCommerce',shopify:'Shopify',pos:'POS',custom:'Custom',client:'Client'}};
+   let icons={{woo:'🛒',shopify:'🛍️',pos:'🏪',custom:'🔧',client:'💻'}};
+   let st={{pending:'{t["pending"]}',approved:'{t["approved"]}',rejected:'{t["rejected"]}'}}[p.status]||p.status;
+   let pr=p.printers?p.printers.join(', '):(p.type==='client'?'{t["offline"]}':'—');
+   ph+=`<tr><td><span class="tag ${{p.type==='client'?'client':'woo'}}">${{icons[p.type]||'📡'}} ${{labels[p.type]||p.type}}</span></td><td>${{p.name}}</td><td><code>${{tok}}</code></td><td>${{st}}</td><td style="font-size:12px;color:#666">${{pr}}</td><td><button class="btn danger small" onclick="delPairing('${{tok}}')">{t["delete_btn"]}</button></td></tr>`;
+  }}
   ph+='</table>';
- }
+ }}
  document.getElementById('pairings').innerHTML=ph;
-
  let sources=Object.entries(pairings).filter(([t,p])=>p.type!=='client');
  let cls=Object.entries(pairings).filter(([t,p])=>p.type==='client');
- let ws=document.getElementById('rt_woo'), ws_val=ws.value;
- let cs=document.getElementById('rt_client'), cs_val=cs.value;
- let ps=document.getElementById('rt_printer'), ps_val=ps.value;
-
- ws.innerHTML='<option value="">— 选择来源 Source —</option>';
- sources.forEach(([t,p])=>ws.add(new Option(p.name+' ('+t+')',t)));
- ws.value=ws_val;
-
- cs.innerHTML='<option value="">— 选择客户端 Client —</option>';
- cls.forEach(([t,p])=>cs.add(new Option(p.name,p.name)));
- cs.value=cs_val;
-
- ps.innerHTML='<option value="">— 默认 Default —</option>';
- if(cs_val){
-  let cl=cls.find(x=>x[1].name===cs_val);
-  if(cl&&cl[1].printers) cl[1].printers.forEach(p=>ps.add(new Option(p,p)));
-  ps.value=ps_val;
- }
-
- document.getElementById('rt_client').onchange=function(){
-  let cn=this.value;
-  let ps2=document.getElementById('rt_printer');
-  ps2.innerHTML='<option value="">— 默认 Default —</option>';
-  let cl2=cls.find(x=>x[1].name===cn);
-  if(cl2&&cl2[1].printers) cl2[1].printers.forEach(p=>ps2.add(new Option(p,p)));
- };
-
+ let ws=document.getElementById('rt_woo'),wsv=ws.value;
+ let cs=document.getElementById('rt_client'),csv=cs.value;
+ let ps=document.getElementById('rt_printer'),psv=ps.value;
+ ws.innerHTML='<option value="">{t["select_source"]}</option>';sources.forEach(([t,p])=>ws.add(new Option(p.name+' ('+t+')',t)));ws.value=wsv;
+ cs.innerHTML='<option value="">{t["select_client"]}</option>';cls.forEach(([t,p])=>cs.add(new Option(p.name,p.name)));cs.value=csv;
+ ps.innerHTML='<option value="">{t["default_printer"]}</option>';
+ if(csv){{let cl=cls.find(x=>x[1].name===csv);if(cl&&cl[1].printers)cl[1].printers.forEach(p=>ps.add(new Option(p,p)));ps.value=psv}}
+ document.getElementById('rt_client').onchange=function(){{let ps2=document.getElementById('rt_printer');ps2.innerHTML='<option value="">{t["default_printer"]}</option>';let c2=cls.find(x=>x[1].name===this.value);if(c2&&c2[1].printers)c2[1].printers.forEach(p=>ps2.add(new Option(p,p)))}}
  let rd=await api('/api/routes');
  let rh='';
- if(!rd.routes||rd.routes.length===0){
-  rh='<span class="empty">暂无路由 No routes — 请先添加配对和客户端 / Add pairings first</span>';
- }else{
-  rh='<table><tr><th>订单来源 Source</th><th>→ 客户端 Client</th><th>→ 打印机 Printer</th><th></th></tr>';
-  rd.routes.forEach((r,i)=>{
-   let wn=(pairings[r.woo_token])?pairings[r.woo_token].name:r.woo_token;
-   rh+=`<tr><td>${wn}</td><td>${r.client||''}</td><td>${r.printer||'默认 Default'}</td><td><button class="btn danger small" onclick="delRoute(${i})">删除 Del</button></td></tr>`;
-  });
+ if(!rd.routes||rd.routes.length===0){{rh='<span class="empty">{t["no_routes"]}</span>'}}
+ else{{
+  rh='<table><tr><th>{t["source_label"]}</th><th>→ {t["client_label"]}</th><th>→ {t["printer_label"]}</th><th></th></tr>';
+  rd.routes.forEach((r,i)=>{{let wn=(pairings[r.woo_token])?pairings[r.woo_token].name:r.woo_token;rh+=`<tr><td>${{wn}}</td><td>${{r.client||''}}</td><td>${{r.printer||'{t["default_printer"]}'}}</td><td><button class="btn danger small" onclick="delRoute(${{i}})">{t["delete_btn"]}</button></td></tr>`}});
   rh+='</table>';
- }
+ }}
  document.getElementById('routes').innerHTML=rh;
-
- let tr=document.getElementById('test_route'), trv=tr.value;
- tr.innerHTML='<option value="">— 选择路由 Route —</option>';
- if(rd.routes&&rd.routes.length>0){
-  rd.routes.forEach((r,i)=>{let wn=(pairings[r.woo_token])?pairings[r.woo_token].name:r.woo_token;tr.add(new Option(wn+' → '+r.client+' → '+(r.printer||'默认'),i))});
-  tr.value=trv;
- }
-
+ let tr=document.getElementById('test_route'),trv=tr.value;
+ tr.innerHTML='<option value="">— {t["select_route_first"]} —</option>';
+ if(rd.routes&&rd.routes.length>0){{rd.routes.forEach((r,i)=>{{let wn=(pairings[r.woo_token])?pairings[r.woo_token].name:r.woo_token;tr.add(new Option(wn+' → '+r.client+' → '+(r.printer||'{t["default_printer"]}'),i))}});tr.value=trv}}
  let hd=await api('/api/history');
  let hh='';
- if(!hd.history||hd.history.length===0) hh='暂无记录 No records';
- else{
-  hh='<table><tr><th>时间 Time</th><th>客户端 Client</th><th>打印机 Printer</th><th>订单 Order</th></tr>';
-  hd.history.slice(0,20).forEach(e=>hh+=`<tr><td>${(e.time||'').slice(11,19)}</td><td>${e.client}</td><td>${e.printer}</td><td>#${e.order} (${e.items}项 items)</td></tr>`);
+ if(!hd.history||hd.history.length===0)hh='<span class="empty">{t["no_history"]}</span>';
+ else{{
+  hh='<table><tr><th>{t["history_time"]}</th><th>{t["history_client"]}</th><th>{t["history_printer"]}</th><th>{t["history_order"]}</th></tr>';
+  hd.history.slice(0,20).forEach(e=>hh+=`<tr><td>${{(e.time||'').slice(11,19)}}</td><td>${{e.client}}</td><td>${{e.printer}}</td><td>#${{e.order}} (${{e.items}} items)</td></tr>`);
   hh+='</table>';
- }
+ }}
  document.getElementById('history').innerHTML=hh;
-}
-
-async function addPairing(){
+}}
+async function addPairing(){{
  let tok=document.getElementById('new_tok').value.trim();
- if(!tok||tok.length<4){document.getElementById('pair_msg').className='msg err';document.getElementById('pair_msg').textContent='Token 太短 / Token too short';return}
+ if(!tok||tok.length<4){{document.getElementById('pair_msg').className='msg err';document.getElementById('pair_msg').textContent='{t["token_short"]}';return}}
  let type=document.getElementById('new_type').value;
  let name=document.getElementById('new_name').value.trim()||(type==='woo'?'WooCommerce':'Client');
- let myPairings = (await api('/api/pairings')).pairings||{};
- let clientCount = Object.values(myPairings).filter(p=>p.type==='client').length;
- let maxClients = (await api('/api/pairings')).max_clients||3;
- if(type==='client' && clientCount >= maxClients){
-  document.getElementById('pair_msg').className='msg err';
-  document.getElementById('pair_msg').textContent='已达客户端上限 / Client limit reached ('+maxClients+')';
-  return;
- }
- let r=await fetch('/api/pairings?token='+T,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok,type:type,name:name,status:'approved'})});
- if(r.ok){
-  document.getElementById('new_tok').value='';document.getElementById('new_name').value='';
-  document.getElementById('pair_msg').className='msg ok';document.getElementById('pair_msg').textContent='✅ 已添加 Added';
- }else{
-  let d=await r.json();
-  document.getElementById('pair_msg').className='msg err';
-  document.getElementById('pair_msg').textContent=(d.error||'添加失败 Failed');
- }
+ let myPairings=(await api('/api/pairings')).pairings||{{}};
+ let cc=Object.values(myPairings).filter(p=>p.type==='client').length;
+ let max=(await api('/api/pairings')).max_clients||3;
+ if(type==='client'&&cc>=max){{document.getElementById('pair_msg').className='msg err';document.getElementById('pair_msg').textContent='{t["limit_reached"]} ('+max+')';return}}
+ let r=await fetch('/api/pairings?token='+T,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:tok,type:type,name:name,status:'approved'}})}});
+ if(r.ok){{document.getElementById('new_tok').value='';document.getElementById('new_name').value='';document.getElementById('pair_msg').className='msg ok';document.getElementById('pair_msg').textContent='{t["added"]}'}}
+ else{{let d=await r.json();document.getElementById('pair_msg').className='msg err';document.getElementById('pair_msg').textContent=d.error||'Failed'}}
  refresh();
-}
-
-async function delPairing(tok){
- if(!confirm('确认删除配对 '+tok+' ？/ Confirm delete?'))return;
- await fetch('/api/forget?token='+T,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok})});
+}}
+async function delPairing(tok){{if(!confirm('{t["confirm_delete"]} '+tok+'?'))return;await fetch('/api/forget?token='+T,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:tok}})}});refresh()}}
+async function addRoute(){{
+ let w=document.getElementById('rt_woo').value,c=document.getElementById('rt_client').value,p=document.getElementById('rt_printer').value;
+ if(!w||!c){{document.getElementById('route_msg').className='msg err';document.getElementById('route_msg').textContent='{t["select_both"]}';return}}
+ let r=await fetch('/api/routes?token='+T,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{woo_token:w,client:c,printer:p}})}});
+ if(r.ok){{document.getElementById('route_msg').className='msg ok';document.getElementById('route_msg').textContent='{t["route_added"]}'}}
+ else{{document.getElementById('route_msg').className='msg err';document.getElementById('route_msg').textContent='{t["route_failed"]}'}}
  refresh();
-}
-
-async function addRoute(){
- let woo=document.getElementById('rt_woo').value;
- let client=document.getElementById('rt_client').value;
- let printer=document.getElementById('rt_printer').value;
- if(!woo||!client){document.getElementById('route_msg').className='msg err';document.getElementById('route_msg').textContent='请选择来源和客户端 / Select source and client';return}
- let r=await fetch('/api/routes?token='+T,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({woo_token:woo,client:client,printer:printer})});
- if(r.ok){
-  document.getElementById('route_msg').className='msg ok';document.getElementById('route_msg').textContent='✅ 路由已添加 Route added';
- }else{
-  document.getElementById('route_msg').className='msg err';document.getElementById('route_msg').textContent='❌ 失败 Failed';
- }
- refresh();
-}
-
-async function delRoute(i){
- await api('/api/routes/'+i,{method:'DELETE'});
- refresh();
-}
-
-async function sendTest(){
+}}
+async function delRoute(i){{await api('/api/routes/'+i,{{method:'DELETE'}});refresh()}}
+async function sendTest(){{
  let ri=document.getElementById('test_route').value;
- if(ri===''){document.getElementById('test_msg').className='msg err';document.getElementById('test_msg').textContent='请选择路由 / Select a route';return}
+ if(ri===''){{document.getElementById('test_msg').className='msg err';document.getElementById('test_msg').textContent='{t["select_route_first"]}';return}}
  let rd=await api('/api/routes');let r=rd.routes[parseInt(ri)];
- if(!r){document.getElementById('test_msg').className='msg err';document.getElementById('test_msg').textContent='路由不存在 / Route not found';return}
- let itemsRaw=document.getElementById('test_items').value;
- let items=[];
- itemsRaw.split('|').forEach(p=>{let x=p.split(',');if(x.length>=2)items.push({name:x[0].trim(),price:parseFloat(x[1]),quantity:parseInt(x[2]||1)})});
+ if(!r){{document.getElementById('test_msg').className='msg err';document.getElementById('test_msg').textContent='{t["route_not_found"]}';return}}
+ let raw=document.getElementById('test_items').value;
+ let items=[];raw.split('|').forEach(p=>{{let x=p.split(',');if(x.length>=2)items.push({{name:x[0].trim(),price:parseFloat(x[1]),quantity:parseInt(x[2]||1)}})}});
  let tot=items.reduce((s,i)=>s+(i.price||0)*(i.quantity||1),0).toFixed(2);
- let body=JSON.stringify({number:document.getElementById('test_order').value,date_created:new Date().toISOString(),payment_method_title:'Test',total:tot,line_items:items,shipping_total:'0.00'});
- let hdrs={'Content-Type':'application/json','X-Print-Client':r.client,'X-Printer-Name':r.printer};
- let res=await fetch('/wc?token='+(r.woo_token||''),{method:'POST',headers:hdrs,body:body});
+ let body=JSON.stringify({{number:document.getElementById('test_order').value,date_created:new Date().toISOString(),payment_method_title:'Test',total:tot,line_items:items,shipping_total:'0.00'}});
+ let hdrs={{'Content-Type':'application/json','X-Print-Client':r.client,'X-Printer-Name':r.printer}};
+ let res=await fetch('/wc?token='+(r.woo_token||''),{{method:'POST',headers:hdrs,body:body}});
  let msg=document.getElementById('test_msg');
- try{
-  let j=await res.json();
-  if(res.ok){msg.className='msg ok';msg.textContent='✅ 已发送 Sent → '+JSON.stringify(j)}
-  else{msg.className='msg err';msg.textContent=(j.error||j.detail||'失败 Failed')}
- }catch(e){msg.className='msg err';msg.textContent='服务器错误 / Server error: '+res.status}
+ try{{let j=await res.json();if(res.ok){{msg.className='msg ok';msg.textContent='{t["sent"]} → '+JSON.stringify(j)}}else{{msg.className='msg err';msg.textContent=j.error||j.detail||'Failed'}}}}
+ catch(e){{msg.className='msg err';msg.textContent='{t["server_error"]}: '+res.status}}
  refresh();
-}
-
+}}
 refresh();setInterval(refresh,10000);
 </script></body></html>"""
 
-ADMIN_HTML = """<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Print Relay · 管理员 Admin</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font:14px/1.6 system-ui,'Microsoft YaHei',sans-serif;background:#f0f2f5;color:#222;padding:20px;max-width:960px;margin:0 auto}
-h1{font-size:22px;margin-bottom:18px}
-.card{background:#fff;border-radius:10px;padding:18px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
-.card h2{font-size:15px;margin-bottom:10px}
-.btn{padding:6px 14px;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:500;margin-right:4px}
-.btn.approve{background:#2e7d32;color:#fff}.btn.reject{background:#e65100;color:#fff}.btn.suspend{background:#c62828;color:#fff}.btn.activate{background:#1976d2;color:#fff}
-.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px}
-.tag.pending{background:#fff3e0;color:#e65100}.tag.active{background:#e8f5e9;color:#2e7d32}.tag.suspended{background:#ffebee;color:#c62828}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{padding:7px 10px;text-align:left;border-bottom:1px solid #eee}
-th{color:#888;font-weight:500;font-size:11px}
-.limits input{width:40px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;font-size:12px;text-align:center}
-.msg{font-size:12px;margin-top:4px}.msg.ok{color:#2e7d32}
-</style></head><body>
-<h1>🔐 Print Relay · 管理员 Admin</h1>
-
-<div class="card">
-<h2>📋 待审核 Pending Approval</h2>
-<div id="pending" class="empty">加载中 / Loading...</div>
+def admin_page(lang):
+    t = T[lang]; css = _page_css()
+    return f"""<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Relay · {t['admin_title']}</title><style>{css}</style></head><body>
+<div class="header"><div class="logo">🖨️ <span>Print Relay</span></div>{_lang_nav(lang)}</div>
+<div class="container">
+<h1>🔐 Print Relay · {t['admin_title']}</h1>
+<div class="card"><h2>📋 {t['admin_pending']}</h2><div id="pending" class="empty">{t['loading']}</div></div>
+<div class="card"><h2>👥 {t['admin_all']}</h2><div id="all_accounts" class="empty">{t['loading']}</div><div id="admin_msg" class="msg"></div></div>
 </div>
-
-<div class="card">
-<h2>👥 全部账号 All Accounts</h2>
-<div id="all_accounts" class="empty">加载中 / Loading...</div>
-<div id="admin_msg" class="msg"></div>
-</div>
-
+{_lang_script()}
 <script>
 const T=new URLSearchParams(location.search).get('token')||'';
-
-async function api(p,o={}){
- let sep=p.includes('?')?'&':'?';
- let r=await fetch(p+sep+'token='+T,o);
- return r.json();
-}
-
-async function refresh(){
- let d=await api('/admin/accounts');
- let pending='',all='';
- if(!d.accounts||Object.keys(d.accounts).length===0){
-  pending='暂无 None';all='暂无 None';
- }else{
-  let pcount=0;
-  for(let [tok,a] of Object.entries(d.accounts)){
-   let statusTag='<span class="tag '+a.status+'">'+(a.status==='pending'?'待审 Pending':a.status==='active'?'活跃 Active':a.status==='suspended'?'暂停 Suspended':a.status)+'</span>';
-   let clients=Object.values(a.pairings||{}).filter(p=>p.type==='client').length;
+async function api(p,o={{}}){{let s=p.includes('?')?'&':'?';let r=await fetch(p+s+'token='+T,o);return r.json()}}
+async function refresh(){{
+ let d=await api('/admin/accounts');let pending='',all='';
+ if(!d.accounts||Object.keys(d.accounts).length===0){{pending='';all=''}}
+ else{{
+  let pc=0;
+  for(let [tok,a] of Object.entries(d.accounts)){{
+   let sts={{pending:'{t["admin_status_pending"]}',active:'{t["admin_status_active"]}',suspended:'{t["admin_status_suspended"]}'}}[a.status]||a.status;
+   let st_t='<span class="tag '+a.status+'">'+sts+'</span>';
+   let clients=Object.values(a.pairings||{{}}).filter(p=>p.type==='client').length;
    let max=a.limits?.max_clients||3;
-
-   let actions='';
-   if(a.status==='pending'){
-    actions='<button class="btn approve" onclick="approve(\''+tok+'\')">批准 Approve</button><button class="btn reject" onclick="reject(\''+tok+'\')">拒绝 Reject</button>';
-    pcount++;
-   }else if(a.status==='active'){
-    actions='<button class="btn suspend" onclick="setStatus(\''+tok+'\',\'suspended\')">暂停 Suspend</button>';
-   }else if(a.status==='suspended'){
-    actions='<button class="btn activate" onclick="setStatus(\''+tok+'\',\'active\')">恢复 Resume</button>';
-   }
-   actions+='<span class="limits"> 上限 Limit <input id="lim_'+tok+'" value="'+max+'" size="2"> <button class="btn activate" onclick="setLimit(\''+tok+'\')">保存 Save</button></span>';
-
-   if(a.status==='pending'){
-    pending+=`<tr><td>${a.email}</td><td>${a.name||'—'}</td><td>${a.created?.slice(0,10)||''}</td><td>${actions}</td></tr>`;
-   }
-   all+=`<tr><td>${a.email}</td><td>${a.name||'—'}</td><td>${statusTag}</td><td>${clients}/${max}</td><td>${a.created?.slice(0,16)||''}</td><td>${actions}</td></tr>`;
-  }
-  pending=(pcount===0?'<span class="empty">无待审核 No pending</span>':'<table><tr><th>邮箱 Email</th><th>名称 Name</th><th>注册时间 Registered</th><th>操作 Action</th></tr>')+pending+(pcount>0?'</table>':'');
-  all='<table><tr><th>邮箱 Email</th><th>名称 Name</th><th>状态 Status</th><th>客户端 Client</th><th>注册时间 Registered</th><th>操作 Action</th></tr>'+all+'</table>';
- }
- document.getElementById('pending').innerHTML=pending;
- document.getElementById('all_accounts').innerHTML=all;
-}
-
-async function approve(tok){await fetch('/admin/approve?token='+T,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok})});refresh()}
-async function reject(tok){await fetch('/admin/reject?token='+T,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok})});refresh()}
-async function setStatus(tok,s){await fetch('/admin/status?token='+T,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok,status:s})});refresh()}
-async function setLimit(tok){
- let v=parseInt(document.getElementById('lim_'+tok).value)||3;
- await fetch('/admin/limits?token='+T,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok,max_clients:v})});
- document.getElementById('admin_msg').className='msg ok';document.getElementById('admin_msg').textContent='✅ 已更新 Updated';
- refresh();
-}
-
+   let acts='';
+   if(a.status==='pending'){{acts='<button class="btn approve" onclick="act(\\''+tok+'\\',\\'approve\\')">{t["approve"]}</button><button class="btn reject" onclick="act(\\''+tok+'\\',\\'reject\\')">{t["reject"]}</button>';pc++}}
+   else if(a.status==='active')acts='<button class="btn suspend" onclick="setStatus(\\''+tok+'\\',\\'suspended\\')">{t["suspend"]}</button>';
+   else if(a.status==='suspended')acts='<button class="btn activate" onclick="setStatus(\\''+tok+'\\',\\'active\\')">{t["resume"]}</button>';
+   acts+='<span class="limits"> {t["limit_label"]} <input id="lim_'+tok+'" value="'+max+'" size="2"> <button class="btn activate" onclick="setLimit(\\''+tok+'\\')">{t["save"]}</button></span>';
+   if(a.status==='pending')pending+=`<tr><td>${{a.email}}</td><td>${{a.name||'—'}}</td><td>${{a.created?.slice(0,10)||''}}</td><td>${{acts}}</td></tr>`;
+   all+=`<tr><td>${{a.email}}</td><td>${{a.name||'—'}}</td><td>${{st_t}}</td><td>${{clients}}/${{max}}</td><td>${{a.created?.slice(0,16)||''}}</td><td>${{acts}}</td></tr>`;
+  }}
+  pending=(pc===0?'<span class="empty">{t["no_pending"]}</span>':'<table><tr><th>{t["admin_email"]}</th><th>{t["admin_name"]}</th><th>{t["admin_registered"]}</th><th>{t["admin_action"]}</th></tr>')+pending+(pc>0?'</table>':'');
+  all='<table><tr><th>{t["admin_email"]}</th><th>{t["admin_name"]}</th><th>{t["admin_status"]}</th><th>{t["clients_label"]}</th><th>{t["admin_registered"]}</th><th>{t["admin_action"]}</th></tr>'+all+'</table>';
+ }}
+ document.getElementById('pending').innerHTML=pending;document.getElementById('all_accounts').innerHTML=all;
+}}
+async function act(tok,type){{let ep=type==='approve'?'/admin/approve':'/admin/reject';await fetch(ep+'?token='+T,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:tok}})}});refresh()}}
+async function setStatus(tok,s){{await fetch('/admin/status?token='+T,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:tok,status:s}})}});refresh()}}
+async function setLimit(tok){{let v=parseInt(document.getElementById('lim_'+tok).value)||3;await fetch('/admin/limits?token='+T,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:tok,max_clients:v}})}});document.getElementById('admin_msg').className='msg ok';document.getElementById('admin_msg').textContent='{t["updated"]}';refresh()}}
 refresh();setInterval(refresh,15000);
 </script></body></html>"""
 
 REGISTER_PAGE_SIMPLE = """<!DOCTYPE html>
 <html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Print Relay · Token</title>
-<style>
+<title>Print Relay · Token</title><style>
 body{font:14px/1.5 system-ui;background:#f5f5f5;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
 .card{background:#fff;border-radius:10px;padding:30px;box-shadow:0 2px 8px rgba(0,0,0,.1);max-width:400px;text-align:center}
 h1{font-size:20px;margin-bottom:8px}.sub{color:#666;font-size:13px;margin-bottom:20px}
 .code{font:bold 32px monospace;background:#e3f2fd;padding:12px 24px;border-radius:8px;letter-spacing:3px;margin:16px 0;display:inline-block}
-.help{font-size:12px;color:#999;margin-top:16px}
-.btn{padding:8px 20px;background:#1976d2;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;margin-top:12px}
-</style></head><body>
-<div class="card">
-<h1>🖨️ Print Relay</h1>
-<div class="sub">Ihr Registrierungs-Token / Your registration token:</div>
+.help{font-size:12px;color:#999;margin-top:16px}.btn{padding:8px 20px;background:#1976d2;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;margin-top:12px}
+</style></head><body><div class="card">
+<h1>🖨️ Print Relay</h1><div class="sub">Ihr Token / Your Token:</div>
 <div class="code">__TOKEN__</div>
-<p class="help">Kopieren und im Control Panel einfugen.<br>Copy and paste into the Control Panel.</p>
-<a href="/login" class="btn">Zum Login / To Login</a>
-</div>
-</body></html>"""
+<p class="help">In Control Panel einfugen / Paste into Control Panel</p>
+<a href="/login" class="btn">Zum Login / Login</a>
+</div></body></html>"""
 
 # ── HTTP Handler ─────────────────────────────────────────────
 
 class WebhookHandler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        log.debug(f"HTTP {args}")
+    def log_message(self, fmt, *args): log.debug(f"HTTP {args}")
 
     def _get_token(self):
         from urllib.parse import parse_qs, urlparse
-        qs = parse_qs(urlparse(self.path).query)
-        return qs.get('token', [''])[0]
+        return parse_qs(urlparse(self.path).query).get('token', [''])[0]
 
-    def _get_account(self, token: str):
-        if not token:
-            return None, None
+    def _get_lang(self):
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        lang = qs.get('lang', [''])[0]
+        if lang not in ('zh', 'en'): lang = 'en'
+        return lang
+
+    def _get_account(self, token):
+        if not token: return None, None
         with state.lock:
-            if token in state.accounts:
-                return token, state.accounts[token]
+            if token in state.accounts: return token, state.accounts[token]
         return None, None
 
-    def _is_admin(self, token: str) -> bool:
-        return token == ADMIN_TOKEN
+    def _is_admin(self, token): return token == ADMIN_TOKEN
 
     def do_GET(self):
         from urllib.parse import parse_qs, urlparse
         path = urlparse(self.path).path
-        token = self._get_token()
+        token = self._get_token(); lang = self._get_lang()
 
-        if path == '/health':
-            self._json({'ok': True}); return
-
-        if path == '/login':
-            self._html(LOGIN_PAGE); return
+        if path == '/health': self._json({'ok': True}); return
+        if path == '/': self._html(landing_page(lang)); return
+        if path == '/login': self._html(login_page(lang)); return
 
         if path == '/register':
             tok = secrets.token_hex(4)
             with state.lock:
                 admin = state.accounts.get(ADMIN_TOKEN, {})
-                admin_pairings = admin.get('pairings', {})
-                admin_pairings[tok] = {"type": "woo", "name": f"Woo-{tok[:4]}", "status": "pending", "created_at": datetime.now(timezone.utc).isoformat()}
+                admin.setdefault('pairings', {})[tok] = {"type":"woo","name":f"Woo-{tok[:4]}","status":"pending","created_at":datetime.now(timezone.utc).isoformat()}
                 state.save()
-            html = REGISTER_PAGE_SIMPLE.replace('__TOKEN__', tok)
-            self._html(html); return
+            self._html(REGISTER_PAGE_SIMPLE.replace('__TOKEN__', tok)); return
 
         if path == '/admin' and self._is_admin(token):
-            self._html(ADMIN_HTML); return
+            self._html(admin_page(lang)); return
 
         if path == '/admin/accounts' and self._is_admin(token):
-            with state.lock:
-                self._json({'accounts': state.accounts}); return
+            with state.lock: self._json({'accounts': state.accounts}); return
 
         acct_tok, acct = self._get_account(token)
         if not acct:
-            if path in ('/', '/panel'):
-                self._html(LOGIN_PAGE); return
+            if path in ('/', '/panel'): self._html(landing_page(lang)); return
             self._json({'error': 'unauthorized'}, 403); return
 
-        if path in ('/', '/panel'):
-            self._html(PANEL_HTML); return
+        if path == '/panel': self._html(panel_page(lang, token)); return
 
         if path == '/api/pairings':
             pairings = acct.get('pairings', {})
-            client_count = sum(1 for p in pairings.values() if p.get('type') == 'client')
-            self._json({
-                'pairings': pairings,
-                'account_name': acct.get('name', ''),
-                'account_email': acct.get('email', ''),
-                'client_count': client_count,
-                'max_clients': acct.get('limits', {}).get('max_clients', 3)
-            }); return
+            cc = sum(1 for p in pairings.values() if p.get('type') == 'client')
+            self._json({'pairings': pairings, 'account_name': acct.get('name',''), 'account_email': acct.get('email',''), 'client_count': cc, 'max_clients': acct.get('limits',{}).get('max_clients',3)}); return
 
-        if path == '/api/routes':
-            self._json({'routes': acct.get('routes', [])}); return
-
-        if path == '/api/history':
-            self._json({'history': acct.get('history', [])}); return
-
+        if path == '/api/routes': self._json({'routes': acct.get('routes',[])}); return
+        if path == '/api/history': self._json({'history': acct.get('history',[])}); return
         self.send_error(404)
 
     def do_POST(self):
@@ -749,270 +715,166 @@ class WebhookHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(cl)) if cl else {}
 
         if path == '/api/register':
-            email = body.get('email', '').strip()
-            password = body.get('password', '')
-            if not email or len(password) < 6:
-                self._json({'error': '邮箱不能为空，密码至少6位 / Email required, password min 6 chars'}, 400); return
-
+            email = body.get('email','').strip(); password = body.get('password','')
+            if not email or len(password) < 6: self._json({'error': 'Email required, password min 6 chars'}, 400); return
             with state.lock:
                 for acct in state.accounts.values():
-                    if acct.get('email') == email:
-                        self._json({'error': '该邮箱已注册 / Email already registered'}, 409); return
-
+                    if acct.get('email') == email: self._json({'error': 'Email already registered'}, 409); return
                 acct_token = _new_account_token()
-                state.accounts[acct_token] = {
-                    "email": email,
-                    "password_hash": _hash_password(password),
-                    "name": "",
-                    "status": "pending",
-                    "limits": {"max_clients": 3},
-                    "pairings": {},
-                    "routes": [],
-                    "history": [],
-                    "created": datetime.now(timezone.utc).isoformat()
-                }
+                state.accounts[acct_token] = {"email":email,"password_hash":_hash_password(password),"name":"","status":"pending","limits":{"max_clients":3},"pairings":{},"routes":[],"history":[],"created":datetime.now(timezone.utc).isoformat()}
                 state.save()
-            log.info(f"新注册 / New registration: {email} → {acct_token}")
-            self._json({'ok': True}); return
+            log.info(f"New registration: {email}"); self._json({'ok': True}); return
 
         if path == '/api/login':
-            email = body.get('email', '').strip()
-            password = body.get('password', '')
-            if email == 'admin' and password == ADMIN_TOKEN:
-                self._json({'token': ADMIN_TOKEN}); return
-
-            with state.lock:
-                for acct_tok, acct in state.accounts.items():
-                    if acct.get('email') == email:
-                        if acct.get('status') == 'suspended':
-                            self._json({'error': '账号已被暂停 / Account suspended'}, 403); return
-                        if _check_password(password, acct['password_hash']):
-                            self._json({'token': acct_tok}); return
-                        self._json({'error': '密码错误 / Wrong password'}, 401); return
-            self._json({'error': '邮箱未注册 / Email not registered'}, 404); return
-
-        if path.startswith('/wc'):
-            woo_token = token
-            found_acct = None
+            email = body.get('email','').strip(); password = body.get('password','')
+            if email == 'admin' and password == ADMIN_TOKEN: self._json({'token': ADMIN_TOKEN}); return
             with state.lock:
                 for atok, acct in state.accounts.items():
-                    if woo_token in acct.get('pairings', {}):
-                        found_acct = atok
-                        break
+                    if acct.get('email') == email:
+                        if acct.get('status') == 'suspended': self._json({'error': 'Account suspended'}, 403); return
+                        if _check_password(password, acct['password_hash']): self._json({'token': atok}); return
+                        self._json({'error': 'Wrong password'}, 401); return
+            self._json({'error': 'Email not registered'}, 404); return
 
-            if not found_acct:
-                self._json({'error': 'unauthorized'}, 403); return
-
-            target_client = self.headers.get('X-Print-Client', '')
-            target_printer = self.headers.get('X-Printer-Name', '')
-            cut_per_item = self.headers.get('X-Cut-Per-Item', '') == '1'
-
+        if path.startswith('/wc'):
+            woo_token = token; found_acct = None
+            with state.lock:
+                for atok, acct in state.accounts.items():
+                    if woo_token in acct.get('pairings',{}): found_acct = atok; break
+            if not found_acct: self._json({'error': 'unauthorized'}, 403); return
+            target_client = self.headers.get('X-Print-Client',''); target_printer = self.headers.get('X-Printer-Name','')
+            cut_per_item = self.headers.get('X-Cut-Per-Item','') == '1'
             if not target_client:
                 order = body
-                if cut_per_item:
-                    order = {**order, 'cut_per_item': True}
+                if cut_per_item: order = {**order, 'cut_per_item': True}
                 with state.lock:
-                    acct = state.accounts[found_acct]
-                    routes = acct.get('routes', [])
+                    acct = state.accounts[found_acct]; routes = acct.get('routes',[])
                 matched = [r for r in routes if r.get('woo_token') == woo_token]
-                if not matched:
-                    log.warning(f"POST /wc: token={woo_token} no routes")
-                    self._json({'error': 'No route configured'}, 503); return
-
+                if not matched: self._json({'error':'No route'}, 503); return
                 results = []
                 for r in matched:
-                    cli = r.get('client', '')
-                    prn = r.get('printer', '')
-                    payload = json.dumps({"type": "print", "order": order, "printer": prn}).encode()
+                    cli = r.get('client',''); prn = r.get('printer','')
+                    payload = json.dumps({"type":"print","order":order,"printer":prn}).encode()
                     ok = run_async(send_to_client(cli, payload))
-                    results.append({'client': cli, 'printer': prn, 'ok': ok})
+                    results.append({'client':cli,'printer':prn,'ok':ok})
                     if ok:
                         with state.lock:
                             a = state.accounts[found_acct]
-                            a.setdefault('history', []).insert(0, {
-                                "time": datetime.now(timezone.utc).isoformat(),
-                                "client": cli, "printer": prn or "default",
-                                "order": str(order.get('number', order.get('id'))),
-                                "items": len(order.get('line_items', []))
-                            })
+                            a.setdefault('history',[]).insert(0,{"time":datetime.now(timezone.utc).isoformat(),"client":cli,"printer":prn or "default","order":str(order.get('number',order.get('id'))),"items":len(order.get('line_items',[]))})
                             if len(a['history']) > 50: a['history'].pop()
-
                 with state.lock: state.save()
-                self._json({'status': 'ok', 'results': results}); return
+                self._json({'status':'ok','results':results}); return
             else:
                 order = {**body}
                 if cut_per_item: order['cut_per_item'] = True
-                payload = json.dumps({"type": "print", "order": order, "printer": target_printer}).encode()
+                payload = json.dumps({"type":"print","order":order,"printer":target_printer}).encode()
                 ok = run_async(send_to_client(target_client, payload))
-                results = [{'client': target_client, 'printer': target_printer, 'ok': ok}]
+                results = [{'client':target_client,'printer':target_printer,'ok':ok}]
                 if ok:
                     with state.lock:
                         a = state.accounts[found_acct]
-                        a.setdefault('history', []).insert(0, {
-                            "time": datetime.now(timezone.utc).isoformat(),
-                            "client": target_client, "printer": target_printer or "default",
-                            "order": str(body.get('number', 'TEST')),
-                            "items": len(body.get('line_items', []))
-                        })
+                        a.setdefault('history',[]).insert(0,{"time":datetime.now(timezone.utc).isoformat(),"client":target_client,"printer":target_printer or "default","order":str(body.get('number','TEST')),"items":len(body.get('line_items',[]))})
                         if len(a['history']) > 50: a['history'].pop()
                 with state.lock: state.save()
-                self._json({'status': 'ok', 'results': results}); return
+                self._json({'status':'ok','results':results}); return
 
         if self._is_admin(token):
             if path == '/admin/approve':
-                u_tok = body.get('token', '')
+                u_tok = body.get('token','')
                 with state.lock:
-                    if u_tok in state.accounts:
-                        state.accounts[u_tok]['status'] = 'active'
-                        state.save()
-                self._json({'ok': True}); return
-
+                    if u_tok in state.accounts: state.accounts[u_tok]['status'] = 'active'; state.save()
+                self._json({'ok':True}); return
             if path == '/admin/reject':
-                u_tok = body.get('token', '')
+                u_tok = body.get('token','')
                 with state.lock:
-                    if u_tok in state.accounts:
-                        state.accounts[u_tok]['status'] = 'rejected'
-                        state.save()
-                self._json({'ok': True}); return
-
+                    if u_tok in state.accounts: state.accounts[u_tok]['status'] = 'rejected'; state.save()
+                self._json({'ok':True}); return
             if path == '/admin/status':
-                u_tok = body.get('token', '')
-                new_status = body.get('status', '')
+                u_tok = body.get('token',''); s = body.get('status','')
                 with state.lock:
-                    if u_tok in state.accounts and new_status in ('active', 'suspended'):
-                        state.accounts[u_tok]['status'] = new_status
-                        state.save()
-                self._json({'ok': True}); return
-
+                    if u_tok in state.accounts and s in ('active','suspended'): state.accounts[u_tok]['status'] = s; state.save()
+                self._json({'ok':True}); return
             if path == '/admin/limits':
-                u_tok = body.get('token', '')
-                mx = body.get('max_clients')
+                u_tok = body.get('token',''); mx = body.get('max_clients')
                 with state.lock:
-                    if u_tok in state.accounts and isinstance(mx, int) and mx > 0:
-                        state.accounts[u_tok].setdefault('limits', {})['max_clients'] = mx
-                        state.save()
-                self._json({'ok': True}); return
+                    if u_tok in state.accounts and isinstance(mx,int) and mx > 0: state.accounts[u_tok].setdefault('limits',{})['max_clients'] = mx; state.save()
+                self._json({'ok':True}); return
 
         acct_tok, acct = self._get_account(token)
-        if not acct:
-            self._json({'error': 'unauthorized'}, 403); return
+        if not acct: self._json({'error':'unauthorized'},403); return
 
         if path == '/api/approve' and acct.get('status') == 'active':
-            ptok = body.get('token', '')
+            ptok = body.get('token','')
             with state.lock:
-                if ptok in acct.get('pairings', {}):
-                    acct['pairings'][ptok]['status'] = 'approved'
-                    state.save()
-            self._json({'ok': True}); return
-
+                if ptok in acct.get('pairings',{}): acct['pairings'][ptok]['status'] = 'approved'; state.save()
+            self._json({'ok':True}); return
         if path == '/api/reject':
-            ptok = body.get('token', '')
+            ptok = body.get('token','')
             with state.lock:
-                if ptok in acct.get('pairings', {}):
-                    acct['pairings'][ptok]['status'] = 'rejected'
-                    state.save()
-            self._json({'ok': True}); return
-
+                if ptok in acct.get('pairings',{}): acct['pairings'][ptok]['status'] = 'rejected'; state.save()
+            self._json({'ok':True}); return
         if path == '/api/forget':
-            ptok = body.get('token', '')
+            ptok = body.get('token','')
             with state.lock:
-                acct['pairings'].pop(ptok, None)
-                acct['routes'] = [r for r in acct.get('routes', []) if r.get('woo_token') != ptok and r.get('client') != ptok]
+                acct['pairings'].pop(ptok,None)
+                acct['routes'] = [r for r in acct.get('routes',[]) if r.get('woo_token') != ptok and r.get('client') != ptok]
                 state.save()
-            self._json({'ok': True}); return
-
+            self._json({'ok':True}); return
         if path == '/api/routes':
             with state.lock:
-                acct.setdefault('routes', []).append({
-                    "woo_token": body.get('woo_token', ''),
-                    "client": body.get('client', ''),
-                    "printer": body.get('printer', ''),
-                })
+                acct.setdefault('routes',[]).append({"woo_token":body.get('woo_token',''),"client":body.get('client',''),"printer":body.get('printer','')})
                 state.save()
-            self._json({'ok': True}); return
-
+            self._json({'ok':True}); return
         if path == '/api/pairings':
-            ptok = body.get('token', '')
-            ptype = body.get('type', 'woo')
-            if not ptok or len(ptok) < 4:
-                self._json({'error': 'Token too short'}, 400); return
-
-            pairings = acct.get('pairings', {})
+            ptok = body.get('token',''); ptype = body.get('type','woo')
+            if not ptok or len(ptok) < 4: self._json({'error':'Token too short'},400); return
+            pairings = acct.get('pairings',{})
             if ptype == 'client':
-                client_count = sum(1 for p in pairings.values() if p.get('type') == 'client')
-                max_clients = acct.get('limits', {}).get('max_clients', 3)
-                if client_count >= max_clients:
-                    self._json({'error': f'已达客户端上限 / Client limit reached ({max_clients})'}, 403); return
-
+                cc = sum(1 for p in pairings.values() if p.get('type') == 'client')
+                mx = acct.get('limits',{}).get('max_clients',3)
+                if cc >= mx: self._json({'error':f'Client limit ({mx})'},403); return
             with state.lock:
-                acct.setdefault('pairings', {})[ptok] = {
-                    "type": ptype,
-                    "name": body.get('name', f"{ptype}-{ptok[:4]}"),
-                    "status": "approved",
-                    "created_at": datetime.now(timezone.utc).isoformat()
-                }
+                acct.setdefault('pairings',{})[ptok] = {"type":ptype,"name":body.get('name',f"{ptype}-{ptok[:4]}"),"status":"approved","created_at":datetime.now(timezone.utc).isoformat()}
                 state.save()
-            self._json({'ok': True, 'token': ptok}); return
-
+            self._json({'ok':True,'token':ptok}); return
         if path == '/api/register':
-            ptok = body.get('token', '')
-            ptype = body.get('type', 'woo')
-            name = body.get('name', f"{ptype}-{ptok[:4]}")
+            ptok = body.get('token',''); ptype = body.get('type','woo'); name = body.get('name',f"{ptype}-{ptok[:4]}")
             with state.lock:
-                if ptok not in acct.get('pairings', {}):
-                    acct.setdefault('pairings', {})[ptok] = {
-                        "type": ptype, "name": name, "status": "approved",
-                        "created_at": datetime.now(timezone.utc).isoformat()
-                    }
-                    state.save()
-            self._json({'ok': True, 'token': ptok}); return
-
+                if ptok not in acct.get('pairings',{}): acct.setdefault('pairings',{})[ptok] = {"type":ptype,"name":name,"status":"approved","created_at":datetime.now(timezone.utc).isoformat()}; state.save()
+            self._json({'ok':True,'token':ptok}); return
         self.send_error(404)
 
     def do_DELETE(self):
         from urllib.parse import parse_qs, urlparse
-        path = urlparse(self.path).path
-        token = self._get_token()
-
+        path = urlparse(self.path).path; token = self._get_token()
         if path.startswith('/api/routes/') and token:
             idx = int(path.split('/')[-1])
             acct_tok, acct = self._get_account(token)
-            if not acct:
-                self._json({'error': 'unauthorized'}, 403); return
+            if not acct: self._json({'error':'unauthorized'},403); return
             with state.lock:
-                routes = acct.get('routes', [])
-                if 0 <= idx < len(routes):
-                    routes.pop(idx)
-                    state.save()
-            self._json({'ok': True}); return
-
+                routes = acct.get('routes',[])
+                if 0 <= idx < len(routes): routes.pop(idx); state.save()
+            self._json({'ok':True}); return
         self.send_error(404)
 
     def _json(self, data, code=200):
-        self.send_response(code)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
+        self.send_response(code); self.send_header('Content-Type','application/json'); self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
 
     def _html(self, html, code=200):
-        self.send_response(code)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.end_headers()
+        self.send_response(code); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
         self.wfile.write(html.encode())
 
 def run_http():
-    server = HTTPServer(('0.0.0.0', HTTP_PORT), WebhookHandler)
-    log.info(f"HTTP 监听 :{HTTP_PORT}")
-    server.serve_forever()
+    HTTPServer(('0.0.0.0', HTTP_PORT), WebhookHandler).serve_forever()
 
 async def main():
-    global main_loop
-    main_loop = asyncio.get_running_loop()
+    global main_loop; main_loop = asyncio.get_running_loop()
     tcp = await asyncio.start_server(handle_client, '0.0.0.0', TCP_PORT)
-    log.info(f"TCP 监听 :{TCP_PORT}")
+    log.info(f"TCP :{TCP_PORT}  HTTP :{HTTP_PORT}")
     Thread(target=run_http, daemon=True).start()
-    async with tcp:
-        await tcp.serve_forever()
+    async with tcp: await tcp.serve_forever()
 
 if __name__ == '__main__':
+    log.info("Print Relay v3 starting...")
     asyncio.run(main())
