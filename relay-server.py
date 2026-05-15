@@ -375,6 +375,18 @@ th{color:#888;font-weight:500;font-size:11px}
 <div id="route_msg" class="msg"></div>
 </div>
 
+<!-- ═══ 测试打印 ═══ -->
+<div class="card">
+<h2>🧪 测试打印</h2>
+<div class="row">
+  <div class="col"><label>选择路由</label><select id="test_route"><option value="">— 请先配置路由 —</option></select></div>
+  <div class="col"><label>订单号</label><input id="test_order" value="TEST-001"></div>
+  <div class="col"><label>菜品（名称,单价,数量|...）</label><input id="test_items" value="Peking Suppe,3.50,2|Frühlingsrolle,4.50,1"></div>
+  <div><label>&nbsp;</label><button class="btn primary" onclick="sendTest()">▶️ 发送测试</button></div>
+</div>
+<div id="test_msg" class="msg"></div>
+</div>
+
 <!-- ═══ 打印历史 ═══ -->
 <div class="card">
 <h2>📋 打印历史</h2>
@@ -459,6 +471,14 @@ async function refresh(){
  }
  document.getElementById('routes').innerHTML=rh;
 
+ // 测试打印下拉
+ let tr=document.getElementById('test_route'), trv=tr.value;
+ tr.innerHTML='<option value="">— 选择路由 —</option>';
+ if(rd.routes&&rd.routes.length>0){
+  rd.routes.forEach((r,i)=>{let wn=(pairings[r.woo_token])?pairings[r.woo_token].name:r.woo_token;tr.add(new Option(wn+' → '+r.client+' → '+(r.printer||'默认'),i))});
+  tr.value=trv;
+ }
+
  let hd=await api('/api/history');
  let hh='';
  if(!hd.history||hd.history.length===0) hh='暂无记录';
@@ -517,6 +537,27 @@ async function addRoute(){
 
 async function delRoute(i){
  await api('/api/routes/'+i,{method:'DELETE'});
+ refresh();
+}
+
+async function sendTest(){
+ let ri=document.getElementById('test_route').value;
+ if(ri===''){document.getElementById('test_msg').className='msg err';document.getElementById('test_msg').textContent='请选择路由';return}
+ let rd=await api('/api/routes');let r=rd.routes[parseInt(ri)];
+ if(!r){document.getElementById('test_msg').className='msg err';document.getElementById('test_msg').textContent='路由不存在';return}
+ let itemsRaw=document.getElementById('test_items').value;
+ let items=[];
+ itemsRaw.split('|').forEach(p=>{let x=p.split(',');if(x.length>=2)items.push({name:x[0].trim(),price:parseFloat(x[1]),quantity:parseInt(x[2]||1)})});
+ let tot=items.reduce((s,i)=>s+(i.price||0)*(i.quantity||1),0).toFixed(2);
+ let body=JSON.stringify({number:document.getElementById('test_order').value,date_created:new Date().toISOString(),payment_method_title:'Test',total:tot,line_items:items,shipping_total:'0.00'});
+ let hdrs={'Content-Type':'application/json','X-Print-Client':r.client,'X-Printer-Name':r.printer};
+ let res=await fetch('/wc?token='+(r.woo_token||''),{method:'POST',headers:hdrs,body:body});
+ let msg=document.getElementById('test_msg');
+ try{
+  let j=await res.json();
+  if(res.ok){msg.className='msg ok';msg.textContent='✅ 已发送 → '+JSON.stringify(j)}
+  else{msg.className='msg err';msg.textContent='❌ '+(j.error||j.detail||res.status)}
+ }catch(e){msg.className='msg err';msg.textContent='❌ 服务器返回: '+res.status}
  refresh();
 }
 
