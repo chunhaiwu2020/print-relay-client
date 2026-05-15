@@ -2,7 +2,7 @@
   "width": 48,
   "lines": [
     {
-      "text": "{{restaurant_name}} - Bar",
+      "text": "{{restaurant_name}}",
       "align": "center",
       "size": "wide",
       "bold": true

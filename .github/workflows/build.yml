@@ -23,62 +23,13 @@ jobs:
     - name: Build EXE
       run: python build.py
     
-    - name: Generate default templates
-      shell: python
-      run: |
-        import json, os
-        
-        os.makedirs('dist/templates', exist_ok=True)
-        
-        kitchen = {
-            "width": 48,
-            "lines": [
-                {"text": "{{restaurant_name}}", "align": "center", "size": "wide", "bold": True},
-                {"text": "Tisch {{table}}  #{{id}}", "align": "center", "bold": True},
-                {"hr": "="},
-                {"repeat": "items", "text": "{{qty}}x {{name}}", "size": "wide"},
-                {"hr": "="}
-            ]
-        }
-        cashier = {
-            "width": 48,
-            "lines": [
-                {"text": "{{restaurant_name}}", "align": "center", "size": "wide", "bold": True},
-                {"text": "Tisch {{table}}  #{{id}}", "align": "center", "bold": True},
-                {"hr": "="},
-                {"repeat": "items", "left": "{{qty}}x {{name}}", "right": "{{total}} EUR", "bold": True},
-                {"hr": "="},
-                {"text": "TOTAL: {{total_amount}} EUR", "align": "right", "size": "xl", "bold": True}
-            ]
-        }
-        bar = {
-            "width": 48,
-            "lines": [
-                {"text": "{{restaurant_name}} - Bar", "align": "center", "size": "wide", "bold": True},
-                {"text": "Tisch {{table}}  #{{id}}", "align": "center", "bold": True},
-                {"hr": "="},
-                {"repeat": "items", "text": "{{qty}}x {{name}}", "size": "wide"},
-                {"hr": "="}
-            ]
-        }
-        
-        for name, data in [('kitchen', kitchen), ('cashier', cashier), ('bar', bar)]:
-            with open(f'dist/templates/{name}.json', 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        # 空白 config.ini (用户进 GUI 选打印机保存)
-        with open('dist/config.ini', 'w') as f:
-            f.write('# Print Relay 配置\n# 请打开软件选择打印机后保存\n')
-        
-        print(f"Generated: {os.listdir('dist/templates')}")
-    
     - name: Install NSIS
       run: choco install nsis -y --no-progress
     
     - name: Build Installer
       run: |
         & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
-        dir *.exe
+        dir PrintRelay-Setup-*.exe
     
     - name: Upload EXE artifact
       uses: actions/upload-artifact@v4

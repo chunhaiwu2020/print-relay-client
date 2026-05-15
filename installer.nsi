@@ -29,10 +29,7 @@ Section "Install"
 
     ; 内置模板
     CreateDirectory "$INSTDIR\templates"
-    File /r "dist\templates\*.json"
-
-    ; 默认 config.ini（如有）
-    File /nonfatal "dist\config.ini"
+    File /r "templates\*.json"
 
     ; ── 桌面快捷方式 ──
     CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\${EXE_NAME}"
