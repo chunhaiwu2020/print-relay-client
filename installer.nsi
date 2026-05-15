@@ -22,13 +22,12 @@ UninstPage uninstConfirm
 UninstPage instfiles
 
 Section "Install"
-    SetOutPath "$INSTDIR"
-
     ; 主程序
+    SetOutPath "$INSTDIR"
     File "dist\${EXE_NAME}"
 
-    ; 内置模板
-    CreateDirectory "$INSTDIR\templates"
+    ; 内置模板 → C:\PrintRelay\templates\
+    SetOutPath "$INSTDIR\templates"
     File /r "templates\*.json"
 
     ; ── 桌面快捷方式 ──
@@ -49,25 +48,20 @@ Section "Install"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayVersion" "${VERSION}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "Publisher" "${COMPANYNAME}"
 
-    ; ── 安装完毕打开软件 ──
-    Exec '"$INSTDIR\${EXE_NAME}"'
+    ; ── 安装完毕，以当前用户身份启动（非admin） ──
+    ExecShell "" "$INSTDIR\${EXE_NAME}"
 SectionEnd
 
 Section "Uninstall"
-    ; 删文件
     Delete "$INSTDIR\${EXE_NAME}"
     Delete "$INSTDIR\config.ini"
     RMDir /r "$INSTDIR\templates"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
 
-    ; 删快捷方式
     Delete "$DESKTOP\${APPNAME}.lnk"
     RMDir /r "$SMPROGRAMS\${APPNAME}"
 
-    ; 删开机启动
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "PrintRelay"
-
-    ; 删卸载信息
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 SectionEnd
