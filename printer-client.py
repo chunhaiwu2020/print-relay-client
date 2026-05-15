@@ -548,6 +548,13 @@ class App:
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
+        # 窗口图标 (exe图标 / 任务栏)
+        _ico = os.path.join(
+            sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__)),
+            'logo.ico')
+        if os.path.exists(_ico):
+            self.root.iconbitmap(default=_ico)
+
         # 托盘图标
         self._hicon = None
         self.root.after(500, self._init_tray)
