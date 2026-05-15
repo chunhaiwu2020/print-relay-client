@@ -503,16 +503,22 @@ class _NOTIFYICONDATA(_ct.Structure):
                 ("hIcon", _w.HICON), ("szTip", _w.CHAR * 128)]
 
 def _get_printer_icon():
-    """获取打印机图标 (SHGetStockIconInfo)"""
-    class _SI(_ct.Structure):
-        _fields_ = [("cbSize", _w.DWORD), ("hIcon", _w.HICON),
-                    ("iSysImageIndex", _ct.c_int), ("iIcon", _ct.c_int),
-                    ("szPath", _w.CHAR * 260)]
-    si = _SI(); si.cbSize = _ct.sizeof(si)
+    """加载自定义图标 (从嵌入的 logo.ico)"""
+    import os
+    # PyInstaller frozen: _MEIPASS, 否则脚本目录
+    if getattr(sys, 'frozen', False):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    ico_path = os.path.join(base, 'logo.ico')
     try:
-        _ct.windll.shell32.SHGetStockIconInfo(16, 0x100, _ct.byref(si))
-        if si.hIcon: return si.hIcon
-    except: pass
+        # LR_LOADFROMFILE=0x10, LR_DEFAULTSIZE=0x40, IMAGE_ICON=1
+        hicon = _ct.windll.user32.LoadImageW(0, ico_path, 1, 0, 0, 0x10 | 0x40)
+        if hicon:
+            return hicon
+    except Exception:
+        pass
+    # Fallback: Windows 默认应用图标
     return _ct.windll.user32.LoadIconW(0, 32512)
 
 # 窗口过程钩子回调

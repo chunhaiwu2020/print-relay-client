@@ -12,7 +12,8 @@ CONSOLE = '--console' in sys.argv or 'console' in sys.argv
 cmd = [
     sys.executable, '-m', 'PyInstaller',
     '--onefile', '--name', 'PrintRelay-Client',
-    '--icon', os.path.join(HERE, 'icon.ico'),
+    '--add-data', f'{os.path.join(HERE, "logo.ico")};.',
+    '--icon', os.path.join(HERE, 'logo.ico'),
     '--collect-all', 'pywin32',
     '--collect-all', 'win32print',
     '--collect-all', 'win32api',
