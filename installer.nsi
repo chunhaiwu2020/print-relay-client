@@ -28,7 +28,7 @@ Section "Install"
 
     ; 内置模板 → C:\PrintRelay\templates\
     SetOutPath "$INSTDIR\templates"
-    File /r "templates\*.json"
+    File "templates\*.json"
 
     ; ── 桌面快捷方式 ──
     CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\${EXE_NAME}"
