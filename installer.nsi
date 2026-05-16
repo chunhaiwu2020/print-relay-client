@@ -3,7 +3,7 @@
 
 !define APPNAME "Print Relay"
 !define COMPANYNAME "ThreePeaks"
-!define VERSION "4.4.0"
+!define VERSION "6.0.1"
 !define EXE_NAME "PrintRelay-Client.exe"
 
 Name "${APPNAME}"
@@ -23,7 +23,12 @@ UninstPage instfiles
 
 Section "Install"
     SetOutPath "$INSTDIR"
+
+    ; Stop any existing release/debug client before replacing files.
+    ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM "${EXE_NAME}"'
+
     File "dist\${EXE_NAME}"
+    File "config.ini"
 
     ; ── 桌面快捷方式 ──
     CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\${EXE_NAME}"
@@ -48,9 +53,9 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+    ExecWait '"$SYSDIR\taskkill.exe" /F /T /IM "${EXE_NAME}"'
     Delete "$INSTDIR\${EXE_NAME}"
     Delete "$INSTDIR\config.ini"
-    RMDir /r "$INSTDIR\templates"
     Delete "$INSTDIR\uninstall.exe"
     RMDir "$INSTDIR"
 
