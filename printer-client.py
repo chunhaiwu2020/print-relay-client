@@ -390,23 +390,16 @@ class App:
         self.stations = {}      # {key: {'var': tk.IntVar, 'combo': ttk.Combobox}}
         self.printers_list = []  # 缓存扫描结果
 
-        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台')]:
+        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台'), ('default', '默认')]:
             row = tt.Frame(pf)
             row.pack(fill=t.X, pady=(0,3))
-            v = t.IntVar(value=1 if key != 'bar' else 0)
+            v = t.IntVar(value=1 if key in ('kitchen','cashier','default') else 0)
             cb = tt.Checkbutton(row, text=label, variable=v,
                                 command=lambda k=key: self._on_check_changed(k))
             cb.pack(side=t.LEFT)
             combo = tt.Combobox(row, state='readonly', width=28)
             combo.pack(side=t.LEFT, padx=(8,0))
-            # 逐菜切纸仅厨房
-            if key == 'kitchen':
-                cut_var = t.IntVar(value=1)
-                cut_cb = tt.Checkbutton(row, text="逐菜切纸", variable=cut_var)
-                cut_cb.pack(side=t.LEFT, padx=(8,0))
-                self.stations[key] = {'var': v, 'combo': combo, 'cut_var': cut_var, 'cut_cb': cut_cb}
-            else:
-                self.stations[key] = {'var': v, 'combo': combo}
+            self.stations[key] = {'var': v, 'combo': combo}
             if key == 'bar':
                 combo.config(state='disabled')
 
@@ -456,19 +449,15 @@ class App:
                 combo.set(default if default else '')
 
     def _on_check_changed(self, key):
-        """勾选/取消勾选时切换下拉和切纸状态"""
+        """勾选/取消勾选时切换下拉状态"""
         st = self.stations[key]
         combo = st['combo']
         if st['var'].get():
             combo.config(state='readonly')
-            if 'cut_cb' in st:
-                st['cut_cb'].config(state='normal')
             if not combo.get() and self.printers_list:
                 combo.set(self.printers_list[0])
         else:
             combo.config(state='disabled')
-            if 'cut_cb' in st:
-                st['cut_cb'].config(state='disabled')
             combo.set('')
 
     def _load_existing_config(self):
@@ -476,15 +465,12 @@ class App:
         cfg = self.client.config
         if not cfg.sections():
             return
-        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台')]:
+        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台'), ('default', '默认')]:
             sec = f'printer.{key}'
             if cfg.has_section(sec):
                 name = cfg.get(sec, 'name', fallback='')
                 st = self.stations[key]
                 st['var'].set(1)
-                if key == 'kitchen':
-                    cut = cfg.getboolean(sec, 'cut_per_item', fallback=True)
-                    st['cut_var'].set(1 if cut else 0)
                 if name:
                     st['combo'].set(name)
                     st['combo'].config(state='readonly')
@@ -497,7 +483,7 @@ class App:
         cfg.optionxform = str
         built = []
 
-        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台')]:
+        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台'), ('default', '默认')]:
             st = self.stations[key]
             if not st['var'].get():
                 continue
