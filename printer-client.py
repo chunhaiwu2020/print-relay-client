@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Print Relay Client v4 — JSON 模板版
-启动 → 读 config.ini → 扫描打印机 → 管理员在面板添加 → 自动连接
-服务器发 JSON → 客户端匹配打印机 → 读对应 JSON 模板 → ESC/POS → 打印机
-每台打印机独立模板，config.ini 配置 station_filter、cut_per_item 等。
+Print Relay Client v6 — Cloud-First 纯通道
+启动 → 扫描打印机 → 面板配对 → TCP 长连
+relay 发送 ticket_b64 → 客户端 base64 解码 → send_raw() 吐出
+零本地渲染，零模板文件，纯管道。
 """
 
-import socket, struct, json, os, sys, time, threading, secrets, logging, configparser
+import socket, struct, json, os, sys, time, threading, secrets, logging, configparser, base64
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +18,6 @@ PAPER_WIDTH = 80
 # 配置文件均在 EXE 目录下
 _EXE_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
 INI_FILE = _EXE_DIR / "config.ini"
-TEMPLATES_DIR = _EXE_DIR / "templates"
 
 def load_config():
     """读取 config.ini"""
@@ -29,31 +28,6 @@ def load_config():
     else:
         log.warning(f"未找到 {INI_FILE} — 请将 config.ini 放到 EXE 同目录")
     return cfg
-
-def find_printer_section(config, printer_name):
-    """根据打印机名匹配 [printer.*] 分区"""
-    for section in config.sections():
-        if section.startswith('printer.'):
-            name = config.get(section, 'name', fallback='')
-            if name == printer_name:
-                return section
-    return None
-
-def load_template(config, section):
-    """读取该分区的 JSON 模板"""
-    tpl_path = config.get(section, 'template', fallback=None)
-    if not tpl_path:
-        return None
-    # 支持相对路径（相对于 EXE 目录）
-    p = Path(tpl_path)
-    if not p.is_absolute():
-        p = _EXE_DIR / p
-    try:
-        with open(p, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        log.error(f"无法加载模板 {p}: {e}")
-        return None
 
 CONFIG_DIR = Path(os.getenv('APPDATA', os.path.expanduser('~'))) / 'PrintRelay'
 CONFIG_FILE = CONFIG_DIR / 'config.json'
@@ -139,156 +113,6 @@ def send_raw(printer, data):
         finally: win32print.ClosePrinter(h)
     except Exception as e:
         log.error(f"打印失败: {e}"); return False
-
-
-# ── ESC/POS 渲染引擎 ──────────────────────────────────────────
-def escpos_init():
-    return b'\x1b\x40'
-
-def escpos_align(align='left'):
-    m = {'left': 0, 'center': 1, 'right': 2}
-    return b'\x1b\x61' + bytes([m.get(align, 0)])
-
-def escpos_bold(on=True):
-    return b'\x1b\x45' + bytes([1 if on else 0])
-
-def escpos_cut():
-    return b'\n\n\n\n\x1d\x56\x00'
-
-def escpos_line(text, width=80):
-    n = 48 if width >= 80 else 32
-    return text.encode('latin-1', errors='replace')[:n] + b'\n'
-
-def escpos_div(char='-', width=80):
-    n = 48 if width >= 80 else 32
-    return (char * n).encode()[:n] + b'\n'
-
-def escpos_feed(n=1):
-    return b'\n' * n
-
-# ── JSON 模板渲染引擎 ────────────────────────────────────────
-import re as _re
-
-# 变量映射：模板变量 → WooCommerce 订单字段访问方式
-VAR_MAP = {
-    'restaurant_name': 'Restaurant Asia Shanghai',
-    'id': lambda o: str(o.get('number', o.get('id', '?'))),
-    'table_id': lambda o: str(o.get('table_id', o.get('table', '?'))),
-    'table': lambda o: str(o.get('table', o.get('table_id', '?'))),
-    'printed_at': lambda o: datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    'total_amount': lambda o: str(o.get('total', '0')),
-    'qty': lambda item: str(item.get('quantity', 1)),
-    'item_code': lambda item: str(item.get('sku', item.get('id', ''))),
-    'name': lambda item: str(item.get('name', '')),
-    'price': lambda item: str(item.get('price', '0')),
-    'total': lambda item: str(item.get('total', item.get('price', '0'))),
-}
-
-def _resolve_vars(template_str, order, item=None):
-    """替换 {{var}} 为实际值"""
-    def repl(m):
-        key = m.group(1)
-        if key in VAR_MAP:
-            v = VAR_MAP[key]
-            if callable(v):
-                return v(item) if item is not None else v(order)
-            return str(v)
-        return m.group(0)
-    return _re.sub(r'\{\{(\w+)\}\}', repl, template_str)
-
-def escpos_size(on, size=''):
-    """size: xl=双高双宽, wide=双宽"""
-    if not on or not size:
-        return b''
-    if size == 'xl':
-        return b'\x1d\x21\x11'  # 双高双宽
-    elif size == 'wide':
-        return b'\x1d\x21\x10'  # 双宽
-    return b''
-
-def escpos_size_off():
-    return b'\x1d\x21\x00'
-
-def escpos_line_len(text, width_mm):
-    """根据 mm 宽度计算字符数（热敏纸 ~2 chars/mm）"""
-    n = int(width_mm * 1.8)  # 48mm → ~86 chars, 42mm → ~75 chars
-    return text.encode('latin-1', errors='replace')[:n] + b'\n'
-
-def render_json_template(template, order, config, section):
-    """用户 JSON 模板格式 → ESC/POS 字节"""
-    width_mm = template.get('width', 48)
-    out = escpos_init()
-
-    lines = template.get('lines', [])
-    items = order.get('line_items', [])
-
-    # station_filter
-    flt = config.get(section, 'station_filter', fallback=None) if section else None
-    if flt:
-        items = [i for i in items if flt.lower() in i.get('name', '').lower() or flt.lower() in i.get('categories', [])]
-
-    for el in lines:
-        if 'hr' in el:
-            ch = el.get('hr', '-')
-            n = int(width_mm * 1.8)
-            out += (ch * n).encode()[:n] + b'\n'
-            continue
-
-        if 'repeat' in el and el['repeat'] == 'items':
-            for item in items:
-                sz = el.get('size', '')
-                bold = el.get('bold', False)
-
-                if sz:
-                    out += escpos_size(True, sz)
-                if bold:
-                    out += escpos_bold(True)
-
-                if 'text' in el:
-                    txt = _resolve_vars(el['text'], order, item)
-                    al = el.get('align', 'left')
-                    if al == 'center':
-                        out += escpos_align('center')
-                    elif al == 'right':
-                        out += escpos_align('right')
-                    out += escpos_line_len(txt, width_mm)
-                elif 'left' in el or 'right' in el:
-                    left = _resolve_vars(el.get('left', ''), order, item)
-                    right = _resolve_vars(el.get('right', ''), order, item)
-                    n = int(width_mm * 1.8)
-                    txt = left.ljust(n - len(right)) + right
-                    out += escpos_line_len(txt, width_mm)
-
-                if sz:
-                    out += escpos_size_off()
-                if bold:
-                    out += escpos_bold(False)
-            continue
-
-        if 'text' in el:
-            txt = _resolve_vars(el['text'], order)
-            al = el.get('align', 'left')
-            bold = el.get('bold', False)
-            sz = el.get('size', '')
-
-            if sz:
-                out += escpos_size(True, sz)
-            if bold:
-                out += escpos_bold(True)
-
-            if al == 'center':
-                out += escpos_align('center')
-            elif al == 'right':
-                out += escpos_align('right')
-
-            out += escpos_line_len(txt, width_mm)
-
-            if sz:
-                out += escpos_size_off()
-            if bold:
-                out += escpos_bold(False)
-
-    return out
 
 
 # ── 客户端核心 ───────────────────────────────────────────────
@@ -412,58 +236,20 @@ class Client:
                         log.warning(f"无效 JSON: {data[:100]}")
                         continue
 
-                    if msg.get('type') != 'print':
-                        continue
-
-                    order = msg.get('order', {})
+                    ticket_b64 = msg.get('ticket_b64', '')
                     target_printer = msg.get('printer', '')
 
-                    # 匹配 config.ini 中的打印机配置
-                    sec = find_printer_section(self.config, target_printer)
-                    template = load_template(self.config, sec) if sec else None
-
-                    if not template:
-                        log.warning(f"无模板匹配: {target_printer}")
+                    if not ticket_b64 or not target_printer:
                         continue
 
-                    try:
-                        ticket = render_json_template(template, order, self.config, sec)
-                    except Exception as e:
-                        log.error(f"模板渲染失败: {e}")
-                        continue
-
-                    printer = target_printer or (self.printers[0] if self.printers else None)
-                    if not printer:
-                        log.warning("无可用打印机")
-                        continue
-
-                    if sec:
-                        mode = self.config.get(sec, 'mode', fallback='receipt')
-                        feed_n = self.config.getint(sec, 'feed_lines', fallback=0)
-                        cut_per = self.config.getboolean(sec, 'cut_per_item', fallback=False)
+                    ticket = base64.b64decode(ticket_b64)
+                    printer = target_printer
+                    ok = send_raw(printer, ticket)
+                    onum = msg.get('order_id', '?')
+                    if ok:
+                        self._state('approved', f'☁️ #{onum} ({len(ticket)}B) -> {printer}')
                     else:
-                        mode, feed_n, cut_per = 'receipt', 0, False
-
-                    if mode == 'per_item':
-                        # 逐菜切纸
-                        for item in order.get('line_items', []):
-                            one = {'line_items': [item],
-                                   **{k: v for k, v in order.items() if k != 'line_items'}}
-                            t = render_json_template(template, one, self.config, sec)
-                            if feed_n:
-                                t += escpos_feed(feed_n)
-                            if cut_per:
-                                t += escpos_cut()
-                            send_raw(printer, t)
-                        onum = order.get('number', '?')
-                        self._state('approved', f'per_item #{onum} -> {printer}')
-                    else:
-                        ok = send_raw(printer, ticket)
-                        onum = order.get('number', '?')
-                        if ok:
-                            self._state('approved', f'已打印 #{onum} ({len(ticket)}B) -> {printer}')
-                        else:
-                            self._state('error', f'打印失败 #{onum} -> {printer}')
+                        self._state('error', f'打印失败 #{onum} -> {printer}')
                 except socket.timeout:
                     continue
                 except:
@@ -704,11 +490,11 @@ class App:
                     st['combo'].config(state='readonly')
 
     def _save_config(self):
-        """生成 config.ini 并写入内置模板"""
+        """生成 config.ini（仅打印机名映射）"""
         from configparser import ConfigParser
 
         cfg = ConfigParser()
-        cfg.optionxform = str  # 保留大小写
+        cfg.optionxform = str
         built = []
 
         for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台')]:
@@ -722,32 +508,15 @@ class App:
             sec = f'printer.{key}'
             cfg.add_section(sec)
             cfg.set(sec, 'name', printer)
-            if key == 'kitchen':
-                cut = st['cut_var'].get()
-                cfg.set(sec, 'template', f'templates/kitchen_item.json' if cut else f'templates/kitchen.json')
-                cfg.set(sec, 'mode', 'per_item')
-                cfg.set(sec, 'cut_per_item', 'true' if cut else 'false')
-                cfg.set(sec, 'feed_lines', '4')
-            elif key == 'cashier':
-                cfg.set(sec, 'template', 'templates/cashier.json')
-                cfg.set(sec, 'mode', 'receipt')
-                cfg.set(sec, 'feed_lines', '4')
-            elif key == 'bar':
-                cfg.set(sec, 'template', 'templates/bar.json')
-                cfg.set(sec, 'mode', 'per_item')
-                cfg.set(sec, 'station_filter', 'drinks')
-                cfg.set(sec, 'feed_lines', '2')
             built.append(label)
 
         if not built:
             self._log("❌ 没有勾选任何站点")
             return
 
-        # 写 config.ini
         with open(INI_FILE, 'w', encoding='utf-8') as f:
             cfg.write(f)
 
-        # 重新加载配置
         self.client.config = load_config()
         self._log(f"✅ 配置已保存: {', '.join(built)}")
 
