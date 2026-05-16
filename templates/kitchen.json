@@ -1,0 +1,13 @@
+{
+    "width": 48,
+    "lines": [
+        {"text": "{{restaurant_name}}", "align": "center", "size": "wide", "bold": true},
+        {"text": "*** COCINA ***", "align": "center", "size": "xl", "bold": true},
+        {"text": "Mesa {{table}}  Pedido #{{id}}", "align": "center"},
+        {"text": "{{printed_at}}", "align": "center"},
+        {"hr": "="},
+        {"repeat": "items", "left": "{{qty}}x  {{name}}", "right": "", "bold": true},
+        {"hr": "-"},
+        {"text": "{{order_note}}", "align": "left"}
+    ]
+}
