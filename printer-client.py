@@ -24,9 +24,9 @@ def load_config():
     cfg = configparser.ConfigParser()
     if INI_FILE.exists():
         cfg.read(INI_FILE, encoding='utf-8')
-        log.info(f"已加载配置: {len(cfg.sections())} 个打印机分区")
+        log.info(f"Config loaded: {len(cfg.sections())} printer sections")
     else:
-        log.warning(f"未找到 {INI_FILE} — 请将 config.ini 放到 EXE 同目录")
+        log.warning(f"Config not found: {INI_FILE} — place config.ini next to EXE")
     return cfg
 
 CONFIG_DIR = Path(os.getenv('APPDATA', os.path.expanduser('~'))) / 'PrintRelay'
@@ -72,31 +72,31 @@ def list_printers():
             flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
             add(p['pPrinterName'] for p in win32print.EnumPrinters(flags, None, 1) if p.get('pPrinterName'))
         except Exception as e:
-            log.warning(f"EnumPrinters level 1 失败: {e}")
+            log.warning(f"EnumPrinters level 1 failed: {e}")
 
-        # 方法2: 本地 (level 2，含虚拟打印机)
+        # Method 2: local (level 2, incl virtual)
         try:
             add(p['pPrinterName'] for p in win32print.EnumPrinters(
                 win32print.PRINTER_ENUM_LOCAL, None, 2) if p.get('pPrinterName'))
         except Exception as e:
-            log.warning(f"EnumPrinters level 2 失败: {e}")
+            log.warning(f"EnumPrinters level 2 failed: {e}")
 
-        # 方法3: 默认打印机兜底
+        # Method 3: default printer fallback
         try:
             def_printer = win32print.GetDefaultPrinter()
             if def_printer:
                 add([def_printer])
         except Exception as e:
-            log.warning(f"GetDefaultPrinter 失败: {e}")
+            log.warning(f"GetDefaultPrinter failed: {e}")
 
-        printers = sorted(seen)  # 排序，稳定顺序
+        printers = sorted(seen)  # sorted, stable order
         if printers:
-            log.info(f"检测到 {len(printers)} 台打印机: {printers}")
+            log.info(f"Found {len(printers)} printers: {printers}")
         else:
-            log.warning("未检测到任何打印机！请检查: 1) 打印后台服务是否运行 2) 是否安装了打印机驱动")
+            log.warning("No printers detected! Check: 1) Print Spooler running 2) Printer drivers")
         return printers
     except ImportError:
-        log.error("pywin32 未正确安装，无法枚举打印机")
+        log.error("pywin32 not installed, cannot enumerate printers")
         return []
 
 def send_raw(printer, data):
@@ -112,7 +112,7 @@ def send_raw(printer, data):
             return True
         finally: win32print.ClosePrinter(h)
     except Exception as e:
-        log.error(f"打印失败: {e}"); return False
+        log.error(f"Print failed: {e}"); return False
 
 
 # ── 客户端核心 ───────────────────────────────────────────────
@@ -131,21 +131,21 @@ class Client:
         self.on_state = None
 
     def scan_printers(self):
-        """重新扫描打印机，若已连接则通知服务器"""
+        """Rescan printers, notify server if connected"""
         self.printers = list_printers()
         if self.printers:
-            log.info(f"扫描完成: {self.printers}")
+            log.info(f"Scan complete: {self.printers}")
         else:
-            log.warning("扫描完成: 未检测到打印机")
-        # 如果已连接，通知服务器更新
+            log.warning("Scan complete: no printers found")
+        # If connected, notify server
         with self._sock_lock:
             if self._sock:
                 try:
                     info = json.dumps({"paper_width": PAPER_WIDTH, "printers": self.printers})
                     self._sock.sendall(info.encode() + b"\n")
-                    log.info("已通知服务器打印机列表更新")
+                    log.info("Server notified of printer list update")
                 except Exception as e:
-                    log.warning(f"通知服务器失败: {e}")
+                    log.warning(f"Failed to notify server: {e}")
         return self.printers
 
     def start(self): 
@@ -159,21 +159,21 @@ class Client:
     def _loop(self):
         while self.running:
             try: self._run()
-            except Exception as e: log.error(f"循环异常: {e}")
+            except Exception as e: log.error(f"Loop error: {e}")
             if self.running:
-                self._state('connecting', '5 秒后重连...')
+                self._state('connecting', 'Reconnecting in 5s...')
                 for _ in range(5):
                     if not self.running: return
                     time.sleep(1)
 
     def _run(self):
-        self._state('connecting', f'连接中 {RELAY_HOST}:{RELAY_PORT}...')
+        self._state('connecting', f'Connecting to {RELAY_HOST}:{RELAY_PORT}...')
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(10)
         sock.connect((RELAY_HOST, RELAY_PORT))
 
-        # TCP keepalive — 防 NAT 空闲超时断连
+        # TCP keepalive — prevent NAT timeout disconnect
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         except: pass
@@ -181,44 +181,44 @@ class Client:
         # REGISTER
         sock.sendall(f"REGISTER {self.token}\n".encode())
 
-        # 发送打印机列表
+        # Send printer list
         if not self.printers:
             self.printers = list_printers()
         if not self.printers:
-            self._state('warning', '未检测到打印机！请检查打印后台服务')
+            self._state('warning', 'No printers found! Check print spooler')
         info = json.dumps({"paper_width": PAPER_WIDTH, "printers": self.printers})
         sock.sendall(info.encode() + b"\n")
 
-        # 等待服务器响应
+        # Wait for server response
         resp = sock.recv(1024).strip()
         if resp == b'UNKNOWN_TOKEN':
-            self._state('error', '未知 Token — 请在控制面板添加此配对码')
+            self._state('error', 'Unknown token — add this code in control panel')
             sock.close(); return
         if resp == b'WRONG_TYPE':
-            self._state('error', 'Token 类型不是客户端')
+            self._state('error', 'Token is not a client type')
             sock.close(); return
 
         if resp == b'PENDING':
-            self._state('pending', f'等待面板审批... 配对码: {self.token}')
+            self._state('pending', f'Waiting approval... Code: {self.token}')
             while self.running:
                 try:
                     r2 = sock.recv(1024).strip()
                     if r2 == b'APPROVED':
-                        self._state('approved', '已审批！打印机就绪。')
+                        self._state('approved', 'Approved! Printer ready.')
                         break
                 except: break
         elif resp == b'APPROVED':
-            self._state('approved', '已连接并审批')
+            self._state('approved', 'Connected & approved')
         else:
-            self._state('error', f'未知响应: {resp}')
+            self._state('error', f'Unknown response: {resp}')
             sock.close(); return
 
-        # 正常模式 — 接收打印任务
+        # Normal mode — receive print jobs
         with self._sock_lock:
             self._sock = sock
         sock.settimeout(60)
-        printer_str = ', '.join(self.printers) if self.printers else '无'
-        self._state('approved', f'在线 | 打印机: {printer_str}')
+        printer_str = ', '.join(self.printers) if self.printers else 'None'
+        self._state('approved', f'Online | Printers: {printer_str}')
         try:
             while self.running:
                 try:
@@ -233,7 +233,7 @@ class Client:
                     try:
                         msg = json.loads(data.decode('utf-8'))
                     except:
-                        log.warning(f"无效 JSON: {data[:100]}")
+                        log.warning(f"Invalid JSON: {data[:100]}")
                         continue
 
                     ticket_b64 = msg.get('ticket_b64', '')
@@ -249,7 +249,7 @@ class Client:
                     if ok:
                         self._state('approved', f'☁️ #{onum} ({len(ticket)}B) -> {printer}')
                     else:
-                        self._state('error', f'打印失败 #{onum} -> {printer}')
+                        self._state('error', f'Print failed #{onum} -> {printer}')
                 except socket.timeout:
                     continue
                 except:
@@ -259,7 +259,7 @@ class Client:
                 self._sock = None
             try: sock.close()
             except: pass
-            self._state('connecting', '连接断开')
+            self._state('connecting', 'Disconnected')
 
     def _recv(self, sock, n):
         buf = b''
@@ -357,43 +357,43 @@ class App:
     def _build(self):
         t = self.tk; tt = self.ttk
 
-        # 标题
+        # Title
         f = tt.Frame(self.root, padding=16)
         f.pack(fill=t.X)
-        tt.Label(f, text="Print Relay Client", font=('Microsoft YaHei', 14, 'bold')).pack()
+        tt.Label(f, text="Print Relay Client", font=('Segoe UI', 14, 'bold')).pack()
         tt.Label(f, text=f"PC: {CLIENT_NAME}", foreground='#666').pack()
 
         tt.Separator(self.root, orient=t.HORIZONTAL).pack(fill=t.X, padx=16)
 
-        # 状态
+        # Status
         sf = tt.Frame(self.root, padding=12)
         sf.pack(fill=t.X)
-        self.status_lbl = tt.Label(sf, text="启动中...", font=('Microsoft YaHei', 11))
+        self.status_lbl = tt.Label(sf, text="Starting...", font=('Segoe UI', 11))
         self.status_lbl.pack()
 
-        # Token 卡片
-        tf = tt.LabelFrame(self.root, text="配对码", padding=14)
+        # Pairing Code
+        tf = tt.LabelFrame(self.root, text="Pairing Code", padding=14)
         tf.pack(fill=t.X, padx=16, pady=(8,4))
 
         tok_row = tt.Frame(tf)
         tok_row.pack(fill=t.X)
         self.token_lbl = tt.Label(tok_row, text=self.client.token, font=('Consolas', 22, 'bold'), foreground='#1565c0')
         self.token_lbl.pack(side=t.LEFT, padx=(0,12))
-        self.copy_btn = tt.Button(tok_row, text="复制配对码", command=self._copy_token)
+        self.copy_btn = tt.Button(tok_row, text="Copy Code", command=self._copy_token)
         self.copy_btn.pack(side=t.LEFT)
-        tt.Label(tf, text="将此配对码填入控制面板完成配对", foreground='#999', font=('Microsoft YaHei', 9)).pack(pady=(8,0))
+        tt.Label(tf, text="Enter this code in the control panel to pair", foreground='#999', font=('Segoe UI', 9)).pack(pady=(8,0))
 
-        # 打印配置区（厨房/收银/吧台）
-        pf = tt.LabelFrame(self.root, text="打印配置", padding=12)
+        # Printer Configuration
+        pf = tt.LabelFrame(self.root, text="Printer Configuration", padding=12)
         pf.pack(fill=t.X, padx=16, pady=(8,4))
 
         self.stations = {}      # {key: {'var': tk.IntVar, 'combo': ttk.Combobox}}
         self.printers_list = []  # 缓存扫描结果
 
-        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台'), ('default', '默认')]:
+        for key, label in [('kitchen', 'Kitchen'), ('cashier', 'Cashier'), ('bar', 'Bar'), ('default', 'Default')]:
             row = tt.Frame(pf)
             row.pack(fill=t.X, pady=(0,3))
-            v = t.IntVar(value=1 if key in ('kitchen','cashier','default') else 0)
+            v = t.IntVar(value=1 if key == 'default' else 0)
             cb = tt.Checkbutton(row, text=label, variable=v,
                                 command=lambda k=key: self._on_check_changed(k))
             cb.pack(side=t.LEFT)
@@ -405,37 +405,37 @@ class App:
 
         btn_row = tt.Frame(pf)
         btn_row.pack(fill=t.X, pady=(8,0))
-        self.save_btn = tt.Button(btn_row, text="💾 保存配置", command=self._save_config)
+        self.save_btn = tt.Button(btn_row, text="💾 Save Config", command=self._save_config)
         self.save_btn.pack(side=t.LEFT)
-        self.scan_btn = tt.Button(btn_row, text="🔄 重新扫描", command=self._scan_and_show)
+        self.scan_btn = tt.Button(btn_row, text="🔄 Rescan", command=self._scan_and_show)
         self.scan_btn.pack(side=t.LEFT, padx=(8,0))
 
-        # 加载已有 config.ini
+        # Load existing config.ini
         self._load_existing_config()
 
-        # 日志
-        lf = tt.LabelFrame(self.root, text="日志", padding=8)
+        # Log
+        lf = tt.LabelFrame(self.root, text="Log", padding=8)
         lf.pack(fill=t.BOTH, expand=True, padx=16, pady=(4,12))
         self.log_txt = t.Text(lf, height=5, wrap=t.WORD, font=('Consolas', 8), state=t.DISABLED)
         self.log_txt.pack(fill=t.BOTH, expand=True)
 
     def _scan_and_show(self):
         """扫描打印机并更新下拉"""
-        self._log("正在扫描打印机...")
-        self.scan_btn.config(state='disabled', text="扫描中...")
+        self._log("Scanning printers...")
+        self.scan_btn.config(state='disabled', text="Scanning...")
         def do_scan():
             printers = self.client.scan_printers()
             self.root.after(0, lambda: self._on_scan_done(printers))
         threading.Thread(target=do_scan, daemon=True).start()
 
     def _on_scan_done(self, printers):
-        self.scan_btn.config(state='normal', text="🔄 重新扫描")
+        self.scan_btn.config(state='normal', text="🔄 Rescan")
         self.printers_list = printers
         if printers:
-            self._log(f"检测到 {len(printers)} 台打印机: {', '.join(printers)}")
+            self._log(f"Found {len(printers)} printers: {', '.join(printers)}")
             self._refresh_dropdowns(printers)
         else:
-            self._log("未检测到打印机！请检查打印后台服务和驱动")
+            self._log("No printers found! Check spooler & drivers")
 
     def _refresh_dropdowns(self, printers):
         """刷新所有勾选站点的打印机下拉"""
@@ -461,11 +461,11 @@ class App:
             combo.set('')
 
     def _load_existing_config(self):
-        """读取已有 config.ini 预填选项"""
+        """Load existing config.ini presets"""
         cfg = self.client.config
         if not cfg.sections():
             return
-        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台'), ('default', '默认')]:
+        for key, label in [('kitchen', 'Kitchen'), ('cashier', 'Cashier'), ('bar', 'Bar'), ('default', 'Default')]:
             sec = f'printer.{key}'
             if cfg.has_section(sec):
                 name = cfg.get(sec, 'name', fallback='')
@@ -476,20 +476,20 @@ class App:
                     st['combo'].config(state='readonly')
 
     def _save_config(self):
-        """生成 config.ini（仅打印机名映射）"""
+        """Generate config.ini (printer name mapping only)"""
         from configparser import ConfigParser
 
         cfg = ConfigParser()
         cfg.optionxform = str
         built = []
 
-        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台'), ('default', '默认')]:
+        for key, label in [('kitchen', 'Kitchen'), ('cashier', 'Cashier'), ('bar', 'Bar'), ('default', 'Default')]:
             st = self.stations[key]
             if not st['var'].get():
                 continue
             printer = st['combo'].get()
             if not printer:
-                self._log(f"❌ {label} 未选择打印机，跳过")
+                self._log(f"✗ {label}: no printer selected, skipped")
                 continue
             sec = f'printer.{key}'
             cfg.add_section(sec)
@@ -497,27 +497,27 @@ class App:
             built.append(label)
 
         if not built:
-            self._log("❌ 没有勾选任何站点")
+            self._log("✗ No station enabled")
             return
 
         with open(INI_FILE, 'w', encoding='utf-8') as f:
             cfg.write(f)
 
         self.client.config = load_config()
-        self._log(f"✅ 配置已保存: {', '.join(built)}")
+        self._log(f"✓ Config saved: {', '.join(built)}")
 
     def _on_state(self, state, msg):
         self._log(msg)
         if state == 'approved':
-            self.status_lbl.config(text='在线 - 打印机就绪', foreground='#2e7d32')
+            self.status_lbl.config(text='Online - Printer ready', foreground='#2e7d32')
         elif state == 'warning':
-            self.status_lbl.config(text='未检测到打印机', foreground='#e65100')
+            self.status_lbl.config(text='No printer detected', foreground='#e65100')
         elif state == 'pending':
-            self.status_lbl.config(text='等待审批...', foreground='#e65100')
+            self.status_lbl.config(text='Waiting approval...', foreground='#e65100')
         elif state == 'error':
-            self.status_lbl.config(text='错误 - 查看日志', foreground='#c62828')
+            self.status_lbl.config(text='Error - check log', foreground='#c62828')
         else:
-            self.status_lbl.config(text='连接中...', foreground='#1565c0')
+            self.status_lbl.config(text='Connecting...', foreground='#1565c0')
 
     def _log(self, msg):
         self.log_txt.config(state=self.tk.NORMAL)
@@ -527,10 +527,10 @@ class App:
         self.log_txt.config(state=self.tk.DISABLED)
 
     def _copy_token(self):
-        """复制配对码到剪贴板（win32clipboard 直写 + tkinter 兜底）"""
+        """Copy token to clipboard (win32clipboard + tkinter fallback)"""
         token = self.client.token
         ok = False
-        # 方法1: win32clipboard 直接操作（最可靠）
+        # Method 1: win32clipboard direct (most reliable)
         try:
             import win32clipboard
             win32clipboard.OpenClipboard()
@@ -542,27 +542,27 @@ class App:
                 win32clipboard.CloseClipboard()
         except Exception:
             pass
-        # 方法2: tkinter 兜底
+        # Method 2: tkinter fallback
         if not ok:
             try:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(token)
-                self.root.update()  # 强制刷新剪贴板
+                self.root.update()  # Force clipboard flush
                 ok = True
             except Exception:
                 pass
         if ok:
-            self._log("配对码已复制！")
+            self._log("Code copied!")
         else:
-            self._log(f"复制失败，请手动复制: {token}")
+            self._log(f"Copy failed, copy manually: {token}")
 
     def _close(self):
-        """最小化到通知区域"""
+        """Minimize to tray"""
         self.root.withdraw()
-        self._log("已最小化到通知区域")
+        self._log("Minimized to tray")
 
     def _quit(self):
-        """彻底退出"""
+        """Full quit"""
         try:
             _ct.windll.shell32.Shell_NotifyIconA(_NIM_DELETE, _ct.byref(_NOTIFYICONDATA()))
         except: pass
@@ -607,13 +607,13 @@ class App:
         nid.hIcon = hicon
         nid.szTip = b"Print Relay"
         _ct.windll.shell32.Shell_NotifyIconA(_NIM_ADD, _ct.byref(nid))
-        self._log("托盘图标已创建")
+        self._log("Tray icon created")
 
     def _show_tray_menu(self):
         m = self.tk.Menu(self.root, tearoff=0)
-        m.add_command(label="显示窗口", command=self._show)
+        m.add_command(label="Show Window", command=self._show)
         m.add_separator()
-        m.add_command(label="退出", command=self._quit)
+        m.add_command(label="Exit", command=self._quit)
         try:
             m.tk_popup(self.root.winfo_pointerx(), self.root.winfo_pointery())
         finally:
@@ -625,11 +625,11 @@ class App:
 def main():
     if '--install' in sys.argv:
         _install_autostart()
-        print("已注册开机启动")
+        print("Startup registered")
         return
     if '--uninstall' in sys.argv:
         _uninstall_autostart()
-        print("已移除开机启动")
+        print("Startup removed")
         return
 
     # 单实例检查
@@ -637,18 +637,17 @@ def main():
 
     if '--no-gui' in sys.argv:
         c = Client(); c.start()
-        print(f"配对码: {c.token}"); print("按 Ctrl+C 退出")
+        print(f"Pairing code: {c.token}"); print("Press Ctrl+C to exit")
         try:
             while True: time.sleep(1)
         except KeyboardInterrupt: c.stop()
     elif '--scan' in sys.argv:
         printers = list_printers()
         if printers:
-            print(f"检测到 {len(printers)} 台打印机:")
-            for p in printers:
-                print(f"  - {p}")
+            print(f"Found {len(printers)} printers:")
+            for p in printers: print(f"  - {p}")
         else:
-            print("未检测到打印机")
+            print("No printers found")
     else:
         App().run()
 
