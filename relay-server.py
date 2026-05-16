@@ -23,6 +23,10 @@ log = logging.getLogger('relay')
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 ADMIN_TOKEN = "90edba8f0283b2c1"
+EDITOR_HTML_FILE = DATA_DIR / "template-editor.html"
+def _load_editor_html():
+    try: return EDITOR_HTML_FILE.read_text()
+    except: return "<h1>Editor not found</h1>"
 
 def _hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
@@ -316,6 +320,41 @@ T = {
         "save": "Save",
         "updated": "✅ Updated",
         "no_pending": "No pending",
+        "templates_title": "📋 Templates",
+        "templates_pick": "Template", "templates_preview": "Preview", "templates_apply": "Apply",
+        "templates_desc": "Browse and apply print templates for your industry",
+        "templates_all": "All",
+        "edit_tpl": "✏️ Customize", "save_tpl": "💾 Save Custom", "clear_tpl": "Clear Custom", "cancel": "Cancel",
+        "pick_tpl_first": "Select a template first", "tpl_customized": "Customized",
+    },
+    "zh": {
+        "login_title": "登录", "register_title": "注册", "email_ph": "邮箱地址", "password_ph": "密码", "password_hint": "至少6位",
+        "login_action": "登录", "register_action": "注册", "reg_success": "注册成功，等待管理员审核",
+        "panel_title": "控制面板", "pairings_title": "已配对设备", "routes_title": "路由配置", "test_title": "测试打印",
+        "history_title": "打印历史", "loading": "加载中...", "no_pairings": "暂无配对", "type_col": "类型", "name_col": "名称",
+        "status_col": "状态", "printer_col": "打印机", "action_col": "操作", "delete_btn": "删除", "pending": "⏳待审",
+        "approved": "✅已批准", "rejected": "❌拒绝", "offline": "离线", "add_btn": "➕ 添加", "source_label": "来源",
+        "client_label": "客户端", "printer_label": "打印机", "default_printer": "— 默认 —", "select_source": "— 选来源 —",
+        "select_client": "— 选客户端 —", "add_route": "+ 添加路由", "route_added": "✅ 已添加", "route_failed": "❌ 失败",
+        "no_routes": "暂无路由", "test_route_label": "选择路由", "test_order_label": "订单号",
+        "test_items_label": "菜品 (名称,价格,数量|...)", "send_test": "▶️ 发送", "sent": "✅ 已发送",
+        "select_route_first": "请先配置路由", "history_time": "时间", "history_client": "客户端",
+        "history_printer": "打印机", "history_order": "订单", "no_history": "暂无记录", "token_short": "Token 太短",
+        "limit_reached": "已达客户端上限", "added": "✅ 已添加", "confirm_delete": "确认删除配对？",
+        "select_both": "请选择来源和客户端", "route_not_found": "路由不存在", "server_error": "服务器错误",
+        "clients_label": "客户端", "logout": "退出", "admin_title": "管理员", "admin_pending": "待审核",
+        "admin_all": "全部账号", "admin_email": "邮箱", "admin_name": "名称", "admin_registered": "注册时间",
+        "admin_action": "操作", "admin_status": "状态", "admin_status_pending": "待审", "admin_status_active": "活跃",
+        "admin_status_suspended": "暂停", "approve": "批准", "reject": "拒绝", "suspend": "暂停", "resume": "恢复",
+        "limit_label": "上限", "save": "保存", "updated": "✅ 已更新", "no_pending": "无待审核",
+        "title": "Print Relay · 云打印中继", "hero": "订单直达打印机，零配置云打印中继",
+        "sub": "厨房·收银·吧台多站分发，逐菜切纸自适配，插电即用",
+        "features": ["🔌 一键配对","🖨️ 多站分发","📋 多租户","🔒 邮箱注册","🚀 开机自启","🌍 中英双语"],
+        "cta": "立即开始", "login_btn": "登录", "footer": "© 2026 Print Relay · 简单高效的云打印",
+        "templates_title": "📋 模板市场", "templates_pick": "模板", "templates_preview": "预览",
+        "templates_apply": "应用", "templates_desc": "选择适合您行业的打印模板", "templates_all": "全部",
+        "edit_tpl": "✏️ 自定义", "save_tpl": "💾 保存自定义", "clear_tpl": "清除自定义", "cancel": "取消",
+        "pick_tpl_first": "请先选择模板", "tpl_customized": "已自定义",
     }
 }
 
@@ -370,6 +409,20 @@ th{color:#888;font-weight:500;font-size:11px}
 .tabs{display:flex;gap:0;margin-bottom:20px;border-bottom:2px solid #eee}
 .tab{flex:1;text-align:center;padding:10px;cursor:pointer;font-weight:500;color:#888;border-bottom:2px solid transparent;margin-bottom:-2px}
 .tab.active{color:#1976d2;border-bottom-color:#1976d2}
+.tmpl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+.tmpl-card{background:#f8fafc;border:1px solid #e8ecf0;border-radius:8px;padding:12px;cursor:pointer;transition:all .15s}
+.tmpl-card:hover{border-color:#1976d2;box-shadow:0 2px 8px rgba(25,118,210,.1)}
+.tmpl-card .tname{font-weight:600;font-size:13px;margin-bottom:3px}
+.tmpl-card .tdesc{font-size:11px;color:#888}
+.tmpl-card .tind{display:inline-block;margin-top:6px;padding:1px 6px;border-radius:3px;font-size:10px;background:#e3f2fd;color:#1565c0}
+.tmpl-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.tmpl-tab{padding:4px 12px;border-radius:14px;font-size:12px;cursor:pointer;border:1px solid #ddd;background:#fff;white-space:nowrap}
+.tmpl-tab.active{background:#1976d2;color:#fff;border-color:#1976d2}
+.tmpl-preview{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);z-index:999;align-items:center;justify-content:center}
+.tmpl-preview.show{display:flex}
+.tmpl-preview .box{background:#fff;border-radius:12px;padding:24px;max-width:500px;width:90%;max-height:80vh;overflow-y:auto}
+.tmpl-preview .box h3{font-size:16px;margin-bottom:12px}
+.tmpl-preview .box pre{font-size:11px;background:#f5f5f5;padding:12px;border-radius:6px;overflow-x:auto;white-space:pre-wrap;max-height:45vh}
 """
 
 def _lang_nav(lang):
@@ -456,7 +509,7 @@ def panel_page(lang, token):
 <div class="header"><div class="logo">🖨️ <span>Print Relay</span></div>{_lang_nav(lang)}</div>
 <div class="container">
 <h1>🖨️ Print Relay <span style="font-size:14px;color:#888" id="acct_name"></span></h1>
-<div class="sub"><span id="acct_email"></span> · {t['clients_label']} <span id="acct_clients">0/0</span></div>
+<div class="sub"><span id="acct_email"></span> · {t['clients_label']} <span id="acct_clients">0/0</span> · <a href="https://api.printrelay.es/editor?v=2" target="_blank" style="color:#e94560;text-decoration:none;font-weight:500">🎨 模板编辑器</a></div>
 
 <div class="card"><h2>📡 {t['pairings_title']}</h2>
 <div id="pairings" class="empty">{t['loading']}</div>
@@ -473,12 +526,33 @@ def panel_page(lang, token):
 <div class="col"><label>{t['source_label']}</label><select id="rt_woo"><option value="">{t['select_source']}</option></select></div>
 <div class="col"><label>{t['client_label']}</label><select id="rt_client"><option value="">{t['select_client']}</option></select></div>
 <div class="col"><label>{t['printer_label']}</label><select id="rt_printer"><option value="">{t['default_printer']}</option></select></div>
+<div class="col"><label>{t['templates_pick']}</label><div style="display:flex;gap:3px"><select id="rt_template" style="flex:1" onchange="clearRouteTpl()"><option value="">— {t['default_printer']} —</option></select><button class="btn small" onclick="editTplForRoute()" title="{t['edit_tpl']}" id="btn_edit_tpl" style="padding:4px 8px">✏️</button></div></div>
 <div><label>&nbsp;</label><button class="btn success" onclick="addRoute()">{t['add_route']}</button></div>
 </div><div id="route_msg" class="msg"></div></div>
 
+<div class="card"><h2>{t['templates_title']}</h2><p class="sub">{t['templates_desc']}</p>
+<div class="tmpl-tabs" id="tmpl_tabs"></div>
+<div class="tmpl-grid" id="tmpl_grid"><span class="empty">{t['loading']}</span></div>
+<div class="tmpl-preview" id="tmpl_preview" onclick="if(event.target===this)closePreview()">
+<div class="box"><h3 id="tmpl_pname"></h3><pre id="tmpl_pbody"></pre>
+<button class="btn primary" style="margin-top:10px" onclick="closePreview()">✕ Close</button></div>
+</div></div>
+
+<div class="tmpl-preview" id="tpl_editor" onclick="if(event.target===this)closeTplEditor()">
+<div class="box" style="max-width:650px">
+<h3>✏️ <span id="tpl_edit_name" style="color:#888;font-weight:400"></span></h3>
+<textarea id="tpl_edit_body" style="width:100%;height:350px;font:11px/1.4 monospace;border:1px solid #ccc;border-radius:6px;padding:10px;resize:vertical;tab-size:2" spellcheck="false"></textarea>
+<div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+<button class="btn danger small" onclick="clearRouteTpl()" style="margin-right:auto">清除自定义</button>
+<button class="btn" onclick="closeTplEditor()">取消</button>
+<button class="btn primary" onclick="saveRouteTpl()">💾 保存自定义</button>
+</div>
+</div></div>
+
 <div class="card"><h2>🧪 {t['test_title']}</h2>
 <div class="row">
-<div class="col"><label>{t['test_route_label']}</label><select id="test_route"><option value="">— {t['select_route_first']} —</option></select></div>
+<div class="col"><label>{t['test_route_label']}</label><select id="test_route" onchange="onTestRouteChange()"><option value="">— {t['select_route_first']} —</option></select></div>
+<div class="col"><label>{t['templates_pick']}</label><div style="display:flex;gap:3px"><select id="test_template" style="flex:1"><option value="">— {t['default_printer']} —</option></select><button class="btn small" onclick="editTestTpl()" title="{t['edit_tpl']}" id="btn_test_edit_tpl" style="padding:4px 8px">✏️</button></div></div>
 <div class="col"><label>{t['test_order_label']}</label><input id="test_order" value="TEST-001"></div>
 <div class="col"><label>{t['test_items_label']}</label><input id="test_items" value="Peking Suppe,3.50,2|Frühlingsrolle,4.50,1"></div>
 <div><label>&nbsp;</label><button class="btn primary" onclick="sendTest()">{t['send_test']}</button></div>
@@ -525,8 +599,8 @@ async function refresh(){{
  let rh='';
  if(!rd.routes||rd.routes.length===0){{rh='<span class="empty">{t["no_routes"]}</span>'}}
  else{{
-  rh='<table><tr><th>{t["source_label"]}</th><th>→ {t["client_label"]}</th><th>→ {t["printer_label"]}</th><th></th></tr>';
-  rd.routes.forEach((r,i)=>{{let wn=(pairings[r.woo_token])?pairings[r.woo_token].name:r.woo_token;rh+=`<tr><td>${{wn}}</td><td>${{r.client||''}}</td><td>${{r.printer||'{t["default_printer"]}'}}</td><td><button class="btn danger small" onclick="delRoute(${{i}})">{t["delete_btn"]}</button></td></tr>`}});
+  rh='<table><tr><th>{t["source_label"]}</th><th>→ {t["client_label"]}</th><th>→ {t["printer_label"]}</th><th>{t["templates_pick"]}</th><th></th></tr>';
+  rd.routes.forEach((r,i)=>{{let wn=(pairings[r.woo_token])?pairings[r.woo_token].name:r.woo_token;let tplCell=r.template||'—';if(r.template_override)tplCell+=' <span style="background:#fff3e0;color:#e65100;padding:1px 5px;border-radius:3px;font-size:10px">✏️</span>';rh+=`<tr><td>${{wn}}</td><td>${{r.client||''}}</td><td>${{r.printer||'{t["default_printer"]}'}}</td><td style="font-size:11px;color:#888">${{tplCell}}</td><td><button class="btn danger small" onclick="delRoute(${{i}})">{t["delete_btn"]}</button></td></tr>`}});
   rh+='</table>';
  }}
  document.getElementById('routes').innerHTML=rh;
@@ -559,14 +633,90 @@ async function addPairing(){{
 }}
 async function delPairing(tok){{if(!confirm('{t["confirm_delete"]} '+tok+'?'))return;await fetch('/api/forget?token='+T,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:tok}})}});refresh()}}
 async function addRoute(){{
- let w=document.getElementById('rt_woo').value,c=document.getElementById('rt_client').value,p=document.getElementById('rt_printer').value;
+ let w=document.getElementById('rt_woo').value,c=document.getElementById('rt_client').value,p=document.getElementById('rt_printer').value,tpl=document.getElementById('rt_template').value;
  if(!w||!c){{document.getElementById('route_msg').className='msg err';document.getElementById('route_msg').textContent='{t["select_both"]}';return}}
- let r=await fetch('/api/routes?token='+T,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{woo_token:w,client:c,printer:p}})}});
- if(r.ok){{document.getElementById('route_msg').className='msg ok';document.getElementById('route_msg').textContent='{t["route_added"]}'}}
+ let body={{woo_token:w,client:c,printer:p,template:tpl}};
+ if(_customTpl)body.template_override=_customTpl;
+ let r=await fetch('/api/routes?token='+T,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(body)}});
+ if(r.ok){{document.getElementById('route_msg').className='msg ok';document.getElementById('route_msg').textContent='{t["route_added"]}';clearRouteTpl()}}
  else{{document.getElementById('route_msg').className='msg err';document.getElementById('route_msg').textContent='{t["route_failed"]}'}}
  refresh();
 }}
 async function delRoute(i){{await api('/api/routes/'+i,{{method:'DELETE'}});refresh()}}
+// -- templates --
+let _allTpls={{}};
+async function loadTpls(){{
+ let r=await api('/api/templates');_allTpls=r.templates||{{}};
+ let cats=new Set();Object.entries(_allTpls).forEach(([p,t])=>cats.add(t.industry));
+ let tabs=document.getElementById('tmpl_tabs');
+ tabs.innerHTML='<span class="tmpl-tab active" onclick="showTpl(\\'all\\')">{t["templates_all"]}</span>';
+ cats.forEach(c=>tabs.innerHTML+='<span class="tmpl-tab" onclick="showTpl(\\''+c+'\\')">'+c+'</span>');
+ showTpl('all');
+ // 也填充路由配置的模板下拉
+ let ts=document.getElementById('rt_template'),tsv=ts.value;
+ ts.innerHTML='<option value="">— 默认 —</option>';
+ Object.entries(_allTpls).forEach(([p,t])=>ts.add(new Option(t.name+' ('+t.industry+')',p)));
+ ts.value=tsv;
+ // 也填充测试打印的模板下拉
+ let tt=document.getElementById('test_template'),ttv=tt.value;
+ tt.innerHTML='<option value="">— 默认 —</option>';
+ Object.entries(_allTpls).forEach(([p,t])=>tt.add(new Option(t.name+' ('+t.industry+')',p)));
+ tt.value=ttv;
+}}
+function showTpl(cat){{
+ document.querySelectorAll('.tmpl-tab').forEach(e=>e.classList.toggle('active',e.textContent===cat||(cat==='all'&&e.textContent==='{t["templates_all"]}')));
+ let grid=document.getElementById('tmpl_grid');
+ let e=Object.entries(_allTpls);
+ if(cat!=='all')e=e.filter(([p,t])=>t.industry===cat);
+ if(!e.length){{grid.innerHTML='<span class="empty">{t["no_history"]}</span>';return}}
+ grid.innerHTML=e.map(([p,t])=>'<div class="tmpl-card" onclick="previewTpl(\\''+p+'\\')"><div class="tname">'+t.name+'</div><div class="tdesc">'+t.desc+'</div><span class="tind">'+t.industry+'</span></div>').join('');
+}}
+function previewTpl(path){{let t=_allTpls[path];document.getElementById('tmpl_pname').textContent=t.name+' ('+path+')';document.getElementById('tmpl_pbody').textContent=JSON.stringify(t,null,2);document.getElementById('tmpl_preview').classList.add('show')}}
+function closePreview(){{document.getElementById('tmpl_preview').classList.remove('show')}}
+
+// -- template override (shared editor, route + test) --
+let _customTpl=null, _testCustomTpl=null, _editTarget='route';
+function _tplBtnId(){{return _editTarget==='test'?'btn_test_edit_tpl':'btn_edit_tpl'}}
+function _tplVar(){{return _editTarget==='test'?_testCustomTpl:_customTpl}}
+function _setTplVar(v){{if(_editTarget==='test')_testCustomTpl=v;else _customTpl=v}}
+function _tplSelectId(){{return _editTarget==='test'?'test_template':'rt_template'}}
+async function editTplForRoute(){{_editTarget='route';await _editTpl()}}
+async function editTestTpl(){{_editTarget='test';await _editTpl()}}
+async function _editTpl(){{
+ let path=document.getElementById(_tplSelectId()).value;
+ if(!path){{alert('{t["pick_tpl_first"]}');return}}
+ let d=await api('/api/templates/'+path);
+ document.getElementById('tpl_edit_name').textContent=_allTpls[path]?(_allTpls[path].name+' ('+_allTpls[path].industry+')'):path;
+ document.getElementById('tpl_edit_body').value=_tplVar()||JSON.stringify(d,null,2);
+ document.getElementById('tpl_editor').classList.add('show');
+}}
+function closeTplEditor(){{document.getElementById('tpl_editor').classList.remove('show')}}
+function saveRouteTpl(){{
+ _setTplVar(document.getElementById('tpl_edit_body').value);
+ closeTplEditor();
+ let btn=document.getElementById(_tplBtnId());
+ if(btn){{btn.style.background='#ff9800';btn.style.color='#fff';btn.textContent='✏️✓'}}
+}}
+function clearRouteTpl(){{
+ _setTplVar(null);
+ closeTplEditor();
+ let btn=document.getElementById(_tplBtnId());
+ if(btn){{btn.style.background='';btn.style.color='';btn.textContent='✏️'}}
+}}
+
+async function onTestRouteChange(){{
+ let ri=document.getElementById('test_route').value;
+ if(ri==='')return;
+ let rd=await api('/api/routes');let r=rd.routes[parseInt(ri)];
+ if(!r)return;
+ let tt=document.getElementById('test_template');
+ if(r.template)tt.value=r.template; else tt.value='';
+ // pull custom override from route
+ if(r.template_override){{_testCustomTpl=r.template_override;let btn=document.getElementById('btn_test_edit_tpl');if(btn){{btn.style.background='#ff9800';btn.style.color='#fff';btn.textContent='✏️✓'}}}}
+ else{{_testCustomTpl=null;let btn=document.getElementById('btn_test_edit_tpl');if(btn){{btn.style.background='';btn.style.color='';btn.textContent='✏️'}}}}
+}}
+
+
 async function sendTest(){{
  let ri=document.getElementById('test_route').value;
  if(ri===''){{document.getElementById('test_msg').className='msg err';document.getElementById('test_msg').textContent='{t["select_route_first"]}';return}}
@@ -575,7 +725,11 @@ async function sendTest(){{
  let raw=document.getElementById('test_items').value;
  let items=[];raw.split('|').forEach(p=>{{let x=p.split(',');if(x.length>=2)items.push({{name:x[0].trim(),price:parseFloat(x[1]),quantity:parseInt(x[2]||1)}})}});
  let tot=items.reduce((s,i)=>s+(i.price||0)*(i.quantity||1),0).toFixed(2);
- let body=JSON.stringify({{number:document.getElementById('test_order').value,date_created:new Date().toISOString(),payment_method_title:'Test',total:tot,line_items:items,shipping_total:'0.00'}});
+ let testTpl=document.getElementById('test_template').value;
+ let bodyObj={{number:document.getElementById('test_order').value,date_created:new Date().toISOString(),payment_method_title:'Test',total:tot,line_items:items,shipping_total:'0.00'}};
+ if(testTpl)bodyObj._template=testTpl;
+ if(_testCustomTpl)bodyObj._template_override=_testCustomTpl;
+ let body=JSON.stringify(bodyObj);
  let hdrs={{'Content-Type':'application/json','X-Print-Client':r.client,'X-Printer-Name':r.printer}};
  let res=await fetch('/wc?token='+(r.woo_token||''),{{method:'POST',headers:hdrs,body:body}});
  let msg=document.getElementById('test_msg');
@@ -583,7 +737,7 @@ async function sendTest(){{
  catch(e){{msg.className='msg err';msg.textContent='{t["server_error"]}: '+res.status}}
  refresh();
 }}
-refresh();setInterval(refresh,10000);
+refresh();setInterval(refresh,10000);loadTpls();
 </script></body></html>"""
 
 def admin_page(lang):
@@ -674,6 +828,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
         token = self._get_token(); lang = self._get_lang()
 
         if path == '/health': self._json({'ok': True}); return
+        if path == '/editor':
+            try: self._html(_load_editor_html()); return
+            except: self.send_error(404); return
         if path == '/': self._html(landing_page(lang)); return
         if path == '/login': self._html(login_page(lang)); return
 
@@ -705,6 +862,26 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         if path == '/api/routes': self._json({'routes': acct.get('routes',[])}); return
         if path == '/api/history': self._json({'history': acct.get('history',[])}); return
+        if path == '/api/templates':
+            import glob as _g
+            tdir = DATA_DIR / 'templates'
+            if not tdir.is_dir(): self._json({'templates': {}}); return
+            templates = {}
+            for f in sorted(tdir.glob('**/*.json')):
+                try:
+                    rel = str(f.relative_to(tdir))
+                    d = json.loads(f.read_text())
+                    templates[rel] = {'name': d.get('name',''), 'industry': d.get('industry',''), 'desc': d.get('desc','')}
+                except: pass
+            self._json({'templates': templates}); return
+        if path.startswith('/api/templates/') and len(path) > 15:
+            tpath = DATA_DIR / 'templates' / path[15:].lstrip('/')
+            if tpath.is_file():
+                try:
+                    d = json.loads(tpath.read_text())
+                    self._json(d); return
+                except: pass
+            self._json({'error': 'not found'}, 404); return
         self.send_error(404)
 
     def do_POST(self):
@@ -822,7 +999,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self._json({'ok':True}); return
         if path == '/api/routes':
             with state.lock:
-                acct.setdefault('routes',[]).append({"woo_token":body.get('woo_token',''),"client":body.get('client',''),"printer":body.get('printer','')})
+                acct.setdefault('routes',[]).append({"woo_token":body.get('woo_token',''),"client":body.get('client',''),"printer":body.get('printer',''),"template":body.get('template',''),"template_override":body.get('template_override','')})
                 state.save()
             self._json({'ok':True}); return
         if path == '/api/pairings':
@@ -862,7 +1039,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
 
     def _html(self, html, code=200):
-        self.send_response(code); self.send_header('Content-Type','text/html; charset=utf-8'); self.end_headers()
+        self.send_response(code); self.send_header('Content-Type','text/html; charset=utf-8')
+        self.send_header('Cache-Control','no-store, no-cache, must-revalidate'); self.end_headers()
         self.wfile.write(html.encode())
 
 def run_http():

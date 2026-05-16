@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Print Relay Client v5 — Cloud-First · Local Fallback
-启动 → 注册打印机 → relay 推送渲染好的票据 → 直接打印
-支持云端渲染(优先) + 本地 JSON 模板(兜底)。
+Print Relay Client v4 — JSON 模板版
+启动 → 读 config.ini → 扫描打印机 → 管理员在面板添加 → 自动连接
+服务器发 JSON → 客户端匹配打印机 → 读对应 JSON 模板 → ESC/POS → 打印机
+每台打印机独立模板，config.ini 配置 station_filter、cut_per_item 等。
 """
-import socket, struct, json, os, sys, time, threading, secrets, logging, configparser, base64
+
+import socket, struct, json, os, sys, time, threading, secrets, logging, configparser
 from datetime import datetime
 from pathlib import Path
 
-# ── 配置 ──────────────────────────────────────────────────────
+# ── 硬编码 ───────────────────────────────────────────────────
 RELAY_HOST = "printrelay.es"
 RELAY_PORT = 51902
 PAPER_WIDTH = 80
@@ -413,30 +415,10 @@ class Client:
                     if msg.get('type') != 'print':
                         continue
 
-                    printer = msg.get('printer', '') or (self.printers[0] if self.printers else None)
-                    if not printer:
-                        log.warning("无可用打印机")
-                        continue
-                    onum = msg.get('order', '?')
-
-                    # ── 云端模式：relay 已渲染好 ESC/POS ──
-                    ticket_b64 = msg.get('ticket_b64', '') or msg.get('ticket', '')
-                    if ticket_b64:
-                        try:
-                            ticket = base64.b64decode(ticket_b64)
-                        except Exception as e:
-                            log.error(f"base64 解码失败: {e}")
-                            continue
-                        ok = send_raw(printer, ticket)
-                        if ok:
-                            self._state('approved', f'☁️ #{onum} ({len(ticket)}B) -> {printer}')
-                        else:
-                            self._state('error', f'打印失败 #{onum} -> {printer}')
-                        continue
-
-                    # ── 本地模式：JSON 模板渲染（兜底）──
                     order = msg.get('order', {})
                     target_printer = msg.get('printer', '')
+
+                    # 匹配 config.ini 中的打印机配置
                     sec = find_printer_section(self.config, target_printer)
                     template = load_template(self.config, sec) if sec else None
 
@@ -448,6 +430,11 @@ class Client:
                         ticket = render_json_template(template, order, self.config, sec)
                     except Exception as e:
                         log.error(f"模板渲染失败: {e}")
+                        continue
+
+                    printer = target_printer or (self.printers[0] if self.printers else None)
+                    if not printer:
+                        log.warning("无可用打印机")
                         continue
 
                     if sec:
@@ -557,7 +544,7 @@ class App:
 
         self.root = tk.Tk()
         self.root.title(f"Print Relay - {CLIENT_NAME}")
-        self.root.geometry("460x480")
+        self.root.geometry("460x540")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
@@ -610,13 +597,32 @@ class App:
         self.copy_btn.pack(side=t.LEFT)
         tt.Label(tf, text="将此配对码填入控制面板完成配对", foreground='#999', font=('Microsoft YaHei', 9)).pack(pady=(8,0))
 
-        # 打印机选择（云端模式无需分站，一键配置）
-        pf = tt.LabelFrame(self.root, text="打印机", padding=12)
+        # 打印配置区（厨房/收银/吧台）
+        pf = tt.LabelFrame(self.root, text="打印配置", padding=12)
         pf.pack(fill=t.X, padx=16, pady=(8,4))
 
-        self.printers_list = []
-        self.printer_combo = tt.Combobox(pf, state='readonly', width=38)
-        self.printer_combo.pack(fill=t.X)
+        self.stations = {}      # {key: {'var': tk.IntVar, 'combo': ttk.Combobox}}
+        self.printers_list = []  # 缓存扫描结果
+
+        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台')]:
+            row = tt.Frame(pf)
+            row.pack(fill=t.X, pady=(0,3))
+            v = t.IntVar(value=1 if key != 'bar' else 0)
+            cb = tt.Checkbutton(row, text=label, variable=v,
+                                command=lambda k=key: self._on_check_changed(k))
+            cb.pack(side=t.LEFT)
+            combo = tt.Combobox(row, state='readonly', width=28)
+            combo.pack(side=t.LEFT, padx=(8,0))
+            # 逐菜切纸仅厨房
+            if key == 'kitchen':
+                cut_var = t.IntVar(value=1)
+                cut_cb = tt.Checkbutton(row, text="逐菜切纸", variable=cut_var)
+                cut_cb.pack(side=t.LEFT, padx=(8,0))
+                self.stations[key] = {'var': v, 'combo': combo, 'cut_var': cut_var, 'cut_cb': cut_cb}
+            else:
+                self.stations[key] = {'var': v, 'combo': combo}
+            if key == 'bar':
+                combo.config(state='disabled')
 
         btn_row = tt.Frame(pf)
         btn_row.pack(fill=t.X, pady=(8,0))
@@ -653,41 +659,97 @@ class App:
             self._log("未检测到打印机！请检查打印后台服务和驱动")
 
     def _refresh_dropdowns(self, printers):
-        """刷新打印机下拉"""
+        """刷新所有勾选站点的打印机下拉"""
         opts = printers or self.printers_list or []
-        cur = self.printer_combo.get()
-        self.printer_combo['values'] = opts
-        if not cur or cur not in opts:
-            self.printer_combo.set(opts[0] if opts else '')
+        default = opts[0] if opts else ''
+        for key, st in self.stations.items():
+            combo = st['combo']
+            combo['values'] = opts
+            cur = combo.get()
+            if not cur or cur not in opts:
+                combo.set(default if default else '')
+
+    def _on_check_changed(self, key):
+        """勾选/取消勾选时切换下拉和切纸状态"""
+        st = self.stations[key]
+        combo = st['combo']
+        if st['var'].get():
+            combo.config(state='readonly')
+            if 'cut_cb' in st:
+                st['cut_cb'].config(state='normal')
+            if not combo.get() and self.printers_list:
+                combo.set(self.printers_list[0])
+        else:
+            combo.config(state='disabled')
+            if 'cut_cb' in st:
+                st['cut_cb'].config(state='disabled')
+            combo.set('')
 
     def _load_existing_config(self):
-        """读取已有 config.ini 预填打印机"""
+        """读取已有 config.ini 预填选项"""
         cfg = self.client.config
-        if cfg.has_section('printer'):
-            name = cfg.get('printer', 'name', fallback='')
-            if name:
-                self.printer_combo.set(name)
+        if not cfg.sections():
+            return
+        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台')]:
+            sec = f'printer.{key}'
+            if cfg.has_section(sec):
+                name = cfg.get(sec, 'name', fallback='')
+                st = self.stations[key]
+                st['var'].set(1)
+                if key == 'kitchen':
+                    cut = cfg.getboolean(sec, 'cut_per_item', fallback=True)
+                    st['cut_var'].set(1 if cut else 0)
+                if name:
+                    st['combo'].set(name)
+                    st['combo'].config(state='readonly')
 
     def _save_config(self):
-        """保存打印机配置"""
+        """生成 config.ini 并写入内置模板"""
         from configparser import ConfigParser
-        printer = self.printer_combo.get()
-        if not printer:
-            self._log("❌ 未选择打印机")
-            return
 
         cfg = ConfigParser()
-        cfg.optionxform = str
-        cfg.add_section('printer')
-        cfg.set('printer', 'name', printer)
+        cfg.optionxform = str  # 保留大小写
+        built = []
 
+        for key, label in [('kitchen', '厨房'), ('cashier', '收银'), ('bar', '吧台')]:
+            st = self.stations[key]
+            if not st['var'].get():
+                continue
+            printer = st['combo'].get()
+            if not printer:
+                self._log(f"❌ {label} 未选择打印机，跳过")
+                continue
+            sec = f'printer.{key}'
+            cfg.add_section(sec)
+            cfg.set(sec, 'name', printer)
+            if key == 'kitchen':
+                cut = st['cut_var'].get()
+                cfg.set(sec, 'template', f'templates/kitchen_item.json' if cut else f'templates/kitchen.json')
+                cfg.set(sec, 'mode', 'per_item')
+                cfg.set(sec, 'cut_per_item', 'true' if cut else 'false')
+                cfg.set(sec, 'feed_lines', '4')
+            elif key == 'cashier':
+                cfg.set(sec, 'template', 'templates/cashier.json')
+                cfg.set(sec, 'mode', 'receipt')
+                cfg.set(sec, 'feed_lines', '4')
+            elif key == 'bar':
+                cfg.set(sec, 'template', 'templates/bar.json')
+                cfg.set(sec, 'mode', 'per_item')
+                cfg.set(sec, 'station_filter', 'drinks')
+                cfg.set(sec, 'feed_lines', '2')
+            built.append(label)
+
+        if not built:
+            self._log("❌ 没有勾选任何站点")
+            return
+
+        # 写 config.ini
         with open(INI_FILE, 'w', encoding='utf-8') as f:
             cfg.write(f)
-        self.client.config = cfg
-        self._log(f"✅ 已保存: {printer}")
 
-    def _write_builtin_templates(self):
-        pass  # v5: 云端模式不需要本地模板
+        # 重新加载配置
+        self.client.config = load_config()
+        self._log(f"✅ 配置已保存: {', '.join(built)}")
 
     def _on_state(self, state, msg):
         self._log(msg)
