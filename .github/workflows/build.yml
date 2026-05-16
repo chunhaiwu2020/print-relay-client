@@ -1,8 +1,8 @@
-name: Build Windows EXE
+name: Build Windows EXE + Installer
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, v4.4.1-build]
   workflow_dispatch:
 
 jobs:
@@ -23,8 +23,22 @@ jobs:
     - name: Build EXE
       run: python build.py
     
+    - name: Install NSIS
+      run: choco install nsis -y --no-progress
+    
+    - name: Build Installer
+      run: |
+        & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
+        dir SETUP.exe
+    
     - name: Upload EXE artifact
       uses: actions/upload-artifact@v4
       with:
         name: PrintRelay-Client
         path: dist/PrintRelay-Client.exe
+    
+    - name: Upload Installer artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: PrintRelay-Setup
+        path: SETUP.exe
