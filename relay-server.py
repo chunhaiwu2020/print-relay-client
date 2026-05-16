@@ -151,6 +151,103 @@ async def send_to_client(name, data):
         async with async_lock: clients.pop(name,None)
         return False
 
+# ── ESC/POS 云端渲染引擎 ─────────────────────────────────────
+import re as _re, base64 as _b64
+
+VAR_MAP = {
+    'restaurant_name': 'Restaurant Asia Shanghai',
+    'id': lambda o: str(o.get('number', o.get('id', '?'))),
+    'table_id': lambda o: str(o.get('table_id', o.get('table', '?'))),
+    'table': lambda o: str(o.get('table', o.get('table_id', '?'))),
+    'printed_at': lambda o: datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+    'total_amount': lambda o: str(o.get('total', '0')),
+    'qty': lambda item: str(item.get('quantity', 1)),
+    'item_code': lambda item: str(item.get('sku', item.get('id', ''))),
+    'name': lambda item: str(item.get('name', '')),
+    'price': lambda item: str(item.get('price', '0')),
+    'total': lambda item: str(item.get('total', item.get('price', '0'))),
+}
+
+def _resolve_vars(tmpl, order, item=None):
+    def repl(m):
+        key = m.group(1)
+        if key in VAR_MAP:
+            v = VAR_MAP[key]
+            return v(item) if callable(v) and item is not None else v(order) if callable(v) else str(v)
+        return m.group(0)
+    return _re.sub(r'\{\{(\w+)\}\}', repl, tmpl)
+
+def _esc_init(): return b'\x1b\x40'
+def _esc_align(a='left'): return b'\x1b\x61' + bytes([{'left':0,'center':1,'right':2}.get(a,0)])
+def _esc_bold(on=True): return b'\x1b\x45' + bytes([1 if on else 0])
+def _esc_size(on, s=''):
+    if not on or not s: return b''
+    return b'\x1d\x21\x11' if s == 'xl' else b'\x1d\x21\x10' if s == 'wide' else b''
+def _esc_size_off(): return b'\x1d\x21\x00'
+def _esc_line(text, w_mm):
+    n = int(w_mm * 1.8)
+    return text.encode('latin-1', errors='replace')[:n] + b'\n'
+
+def render_ticket(template, order, station_filter=None):
+    """JSON模板 → ESC/POS bytes"""
+    w = template.get('width', 48)
+    out = _esc_init()
+    items = order.get('line_items', [])
+    if station_filter:
+        items = [i for i in items if station_filter.lower() in i.get('name','').lower()]
+
+    for el in template.get('lines', []):
+        if 'hr' in el:
+            ch = el.get('hr', '-'); n = int(w * 1.8)
+            out += (ch * n).encode()[:n] + b'\n'
+            continue
+        if el.get('repeat') == 'items':
+            for item in items:
+                sz = el.get('size', ''); bold = el.get('bold', False)
+                if sz: out += _esc_size(True, sz)
+                if bold: out += _esc_bold(True)
+                if 'text' in el:
+                    txt = _resolve_vars(el['text'], order, item)
+                    al = el.get('align', 'left')
+                    if al != 'left': out += _esc_align(al)
+                    out += _esc_line(txt, w)
+                elif 'left' in el or 'right' in el:
+                    l = _resolve_vars(el.get('left',''), order, item)
+                    r = _resolve_vars(el.get('right',''), order, item)
+                    n = int(w * 1.8)
+                    out += _esc_line(l.ljust(n - len(r)) + r, w)
+                if sz: out += _esc_size_off()
+                if bold: out += _esc_bold(False)
+            continue
+        if 'text' in el:
+            txt = _resolve_vars(el['text'], order)
+            al = el.get('align', 'left'); bold = el.get('bold', False); sz = el.get('size', '')
+            if sz: out += _esc_size(True, sz)
+            if bold: out += _esc_bold(True)
+            if al != 'left': out += _esc_align(al)
+            out += _esc_line(txt, w)
+            if sz: out += _esc_size_off()
+            if bold: out += _esc_bold(False)
+    return out
+
+def load_and_render(route, order):
+    """加载路由指定的模板，渲染成 base64 ticket"""
+    tpl_path = route.get('template', '')
+    override = route.get('template_override', '')
+    if override:
+        template = json.loads(override)
+    elif tpl_path:
+        fp = DATA_DIR / 'templates' / tpl_path
+        if fp.is_file():
+            template = json.loads(fp.read_text())
+        else:
+            return None
+    else:
+        return None
+    sf = route.get('station_filter', None)
+    ticket = render_ticket(template, order, sf)
+    return _b64.b64encode(ticket).decode()
+
 # ── i18n strings ─────────────────────────────────────────────
 T = {
     "zh": {
@@ -931,7 +1028,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 results = []
                 for r in matched:
                     cli = r.get('client',''); prn = r.get('printer','')
-                    payload = json.dumps({"type":"print","order":order,"printer":prn}).encode()
+                    ticket_b64 = load_and_render(r, order)
+                    if not ticket_b64:
+                        results.append({'client':cli,'printer':prn,'ok':False,'error':'template not found'})
+                        continue
+                    payload = json.dumps({"printer":prn,"ticket_b64":ticket_b64}).encode()
                     ok = run_async(send_to_client(cli, payload))
                     results.append({'client':cli,'printer':prn,'ok':ok})
                     if ok:
@@ -944,7 +1045,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
             else:
                 order = {**body}
                 if cut_per_item: order['cut_per_item'] = True
-                payload = json.dumps({"type":"print","order":order,"printer":target_printer}).encode()
+                # 测试打印: 用 body 中的 _template 或默认 kitchen
+                tpl_path = body.get('_template', 'restaurant/kitchen.json')
+                tpl_override = body.get('_template_override', '')
+                route = {'template': tpl_path, 'template_override': tpl_override}
+                ticket_b64 = load_and_render(route, order)
+                if not ticket_b64:
+                    self._json({'error':'template not found: '+tpl_path}, 404); return
+                payload = json.dumps({"printer":target_printer,"ticket_b64":ticket_b64}).encode()
                 ok = run_async(send_to_client(target_client, payload))
                 results = [{'client':target_client,'printer':target_printer,'ok':ok}]
                 if ok:
