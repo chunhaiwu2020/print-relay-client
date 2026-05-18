@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Relay · 模板编辑器</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font:13px/1.5 system-ui,'Microsoft YaHei',sans-serif;background:#1a1a2e;color:#e0e0e0;height:100vh;display:flex;flex-direction:column}
+.toolbar{background:#16213e;padding:8px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #0f3460}
+.toolbar label{font-size:11px;color:#888;margin-right:2px}
+.toolbar select,.toolbar button{padding:5px 10px;border-radius:5px;border:1px solid #0f3460;background:#1a1a2e;color:#e0e0e0;font-size:12px;cursor:pointer}
+.toolbar button{background:#0f3460;border:none;font-weight:500}
+.toolbar button:hover{background:#1a508b}
+.toolbar button.primary{background:#e94560}
+.toolbar button.primary:hover{background:#c23152}
+.main{display:grid;grid-template-columns:220px 1fr 320px;flex:1;overflow:hidden}
+.panel{overflow-y:auto;padding:10px;border-right:1px solid #0f3460}
+.panel h3{font-size:12px;color:#888;margin-bottom:6px;text-transform:uppercase;letter-spacing:1px}
+.ind-tags{display:grid;grid-template-columns:1fr 1fr;gap:3px;margin-bottom:8px}
+.ind-tag{padding:3px 5px;border-radius:4px;border:1px solid #0f3460;background:#1a1a2e;color:#ccc;font-size:10px;cursor:pointer;text-align:center;transition:all .12s}
+.ind-tag:hover{border-color:#e94560;color:#fff}
+.ind-tag.active{background:#e94560;color:#fff;border-color:#e94560}
+.lib-item{display:block;width:100%;text-align:left;padding:6px 10px;margin-bottom:3px;border:1px solid transparent;border-radius:4px;background:transparent;color:#ccc;font-size:12px;cursor:pointer;transition:all .1s}
+.lib-item:hover{background:#0f3460;border-color:#1a508b;color:#fff}
+.lib-item .icon{margin-right:6px}
+.editor{overflow-y:auto;padding:10px;background:#121225}
+.editor h3{font-size:12px;color:#888;margin-bottom:8px}
+.ticket-line{display:flex;align-items:center;gap:6px;padding:6px 8px;margin-bottom:4px;background:#1a1a2e;border:1px solid #0f3460;border-radius:6px;cursor:move;transition:border .15s}
+.ticket-line:hover{border-color:#1a508b}
+.ticket-line.drag-over{border-color:#e94560;box-shadow:0 0 8px rgba(233,69,96,.3)}
+.ticket-line .tl-content{flex:1;min-width:0}
+.ticket-line .tl-content input{width:100%;padding:4px 8px;border:1px solid #0f3460;border-radius:4px;background:#121225;color:#e0e0e0;font-size:12px}
+.ticket-line .tl-content input:focus{outline:none;border-color:#e94560}
+.ticket-line .tl-content .var-hint{font-size:10px;color:#666;margin-top:2px}
+.ticket-line .tl-meta{display:flex;gap:4px;align-items:center}
+.ticket-line .tl-meta button{padding:2px 6px;font-size:10px;border-radius:3px;border:1px solid #0f3460;background:#1a1a2e;color:#888;cursor:pointer;white-space:nowrap}
+.ticket-line .tl-meta button.active{background:#e94560;color:#fff;border-color:#e94560}
+.ticket-line .tl-meta button:hover{background:#0f3460;color:#fff}
+.ticket-line .tl-actions{display:flex;gap:2px}
+.ticket-line .tl-actions button{padding:2px 5px;font-size:11px;border-radius:3px;border:none;background:transparent;color:#666;cursor:pointer}
+.ticket-line .tl-actions button:hover{color:#e94560}
+#add_btn{display:block;width:100%;padding:8px;margin-top:4px;border:1px dashed #0f3460;border-radius:6px;background:transparent;color:#666;font-size:12px;cursor:pointer}
+#add_btn:hover{border-color:#e94560;color:#e94560}
+.preview{overflow-y:auto;padding:10px;background:#f5f0e8;border-left:1px solid #0f3460;display:flex;justify-content:center}
+.preview .receipt{background:#fff;color:#222;font:13px/1.4 'Courier New',monospace;padding:20px 16px;width:100%;max-width:300px;min-height:200px;box-shadow:0 2px 12px rgba(0,0,0,.3);white-space:pre-wrap;word-break:break-all}
+.preview .receipt .bold{font-weight:bold}
+.preview .receipt .center{text-align:center}
+.preview .receipt .right{text-align:right}
+.preview .receipt .wide{font-size:16px;letter-spacing:1px}
+.preview .receipt .xl{font-size:20px;font-weight:bold;letter-spacing:2px}
+.preview .receipt .hr{color:#aaa;letter-spacing:2px}
+.footer-bar{background:#16213e;padding:6px 12px;display:flex;gap:8px;align-items:center;border-top:1px solid #0f3460}
+.footer-bar button{padding:5px 14px;border-radius:5px;border:none;font-size:12px;cursor:pointer;font-weight:500}
+.footer-bar .btn-save{background:#e94560;color:#fff}
+.footer-bar .btn-copy{background:#0f3460;color:#fff}
+.footer-bar .btn-apply{background:#1a508b;color:#fff}
+.footer-bar button:hover{opacity:.85}
+.footer-bar .msg{font-size:11px;color:#888;margin-left:auto}
+.footer-bar .msg.ok{color:#4caf50}
+.footer-bar .msg.err{color:#e94560}
+/* hr types */
+.tl-type-hr .tl-content input{background:#1a1a2e;color:#e94560;font-weight:bold}
+.tl-type-repeat .tl-content{display:flex;gap:4px}
+.tl-type-repeat .tl-content input{flex:1}
+.line-num{font-size:10px;color:#444;min-width:18px;text-align:right;user-select:none}
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <label>📄 模板</label>
+  <select id="tpl_sel" style="min-width:200px"></select>
+  <button onclick="loadSelectedTpl()">📥 加载</button>
+  <button onclick="newTpl()">✨ 新建空白</button>
+  <span style="color:#888;font-size:11px;margin-left:8px" id="tpl_info"></span>
+</div>
+
+<div class="main">
+  <!-- Left: Library -->
+  <div class="panel" id="lib_panel">
+    <h3>📦 元素库</h3>
+    <div id="lib_items"></div>
+    <h3 style="margin-top:12px">🔤 变量</h3>
+    <div id="lib_vars"></div>
+    <h3 style="margin-top:12px">📋 行业片段</h3>
+    <div class="ind-tags" id="ind_tags"></div>
+    <div id="lib_industry"></div>
+  </div>
+
+  <!-- Center: Editor -->
+  <div class="editor" id="editor_panel">
+    <h3>🎨 票据编辑器 <span style="font-weight:400;font-size:11px;color:#666">（拖拽排序）</span></h3>
+    <div id="ticket_lines"></div>
+    <button id="add_btn" onclick="showAddMenu()">+ 添加行</button>
+  </div>
+
+  <!-- Right: Preview -->
+  <div class="preview">
+    <div class="receipt" id="preview_area"></div>
+  </div>
+</div>
+
+<div class="footer-bar">
+  <button class="btn-save" onclick="saveTpl()">💾 保存为自定义模板</button>
+  <button class="btn-copy" onclick="copyJSON()">📋 复制 JSON</button>
+  <button class="btn-apply" onclick="applyToRoute()">📤 应用到路由编辑器</button>
+  <span class="msg" id="footer_msg"></span>
+  <span style="font-size:10px;color:#444;margin-left:12px">v2 · 标签版</span>
+</div>
+
+<script>
+// ── State ──
+let _allTpls={}, _lines=[], _tplMeta={name:'',industry:'',width:48}, _dragIdx=null, _indFilter='all';
+const RELAY='https://api.printrelay.es';
+
+// ── Template model ──
+// line types: text, hr, repeat
+// text:     {text,align,bold,size}
+// hr:       {hr:"="}
+// repeat:   {repeat:"items",left:"{{qty}}x {{name}}",right:"{{total}}",bold:false,size:""}
+
+// ── Library definitions ──
+const LIB_TEXT=[
+  {icon:'📝',label:'店名',tmpl:'{{restaurant_name}}',hint:'restaurant_name'},
+  {icon:'📅',label:'日期时间',tmpl:'{{printed_at}}',hint:'printed_at'},
+  {icon:'🪑',label:'桌号',tmpl:'Mesa {{table}}',hint:'table'},
+  {icon:'🔢',label:'订单号',tmpl:'Pedido #{{id}}',hint:'id'},
+  {icon:'💰',label:'合计金额',tmpl:'TOTAL {{total_amount}} EUR',hint:'total_amount'},
+  {icon:'🙏',label:'感谢语',tmpl:'¡Gracias por su visita!',hint:''},
+  {icon:'📞',label:'电话',tmpl:'Tel: 93 123 45 67',hint:''},
+  {icon:'🏠',label:'地址',tmpl:'Carrer Example, 123, Barcelona',hint:''},
+];
+const LIB_HR=[
+  {icon:'═',label:'双线 =====',char:'='},
+  {icon:'─',label:'单线 -----',char:'-'},
+  {icon:'·',label:'点线 ·····',char:'·'},
+  {icon:'*',label:'星线 *****',char:'*'},
+];
+const LIB_REPEAT=[
+  {icon:'📋',label:'菜品(双栏)',left:'{{qty}}x {{name}}',right:'{{total}}',bold:true},
+  {icon:'📋',label:'菜品(单栏)',left:'{{qty}}x {{name}}',right:'',bold:false},
+  {icon:'🏷️',label:'编码+数量',left:'{{item_code}} x{{qty}}',right:'{{name}}',bold:false},
+];
+
+// ── Init ──
+async function init(){
+  await loadTemplates();
+  renderIndTags();
+  buildLibrary();
+  newTpl();
+}
+async function loadTemplates(){
+  try{
+    let r=await fetch(RELAY+'/api/templates?token=90edba8f0283b2c1');
+    _allTpls=(await r.json()).templates||{};
+    buildTplSel();
+  }catch(e){console.error('load templates:',e)}
+}
+function renderIndTags(){
+  let cats=new Set(); Object.values(_allTpls).forEach(t=>cats.add(t.industry));
+  let h='<span class="ind-tag active" onclick="filterInd(\'all\')">全部</span>';
+  [...cats].sort().forEach(c=>h+=`<span class="ind-tag" onclick="filterInd('${esc(c)}')">${c}</span>`);
+  document.getElementById('ind_tags').innerHTML=h;
+}
+function filterInd(cat){
+  _indFilter=cat;
+  document.querySelectorAll('.ind-tag').forEach(t=>t.classList.toggle('active',t.textContent===cat||(cat==='all'&&t.textContent==='全部')));
+  buildLibrary();
+  buildTplSel();
+}
+function buildTplSel(){
+  let sel=document.getElementById('tpl_sel');
+  sel.innerHTML='<option value="">— 选模板 —</option>';
+  Object.entries(_allTpls).filter(([p,t])=>_indFilter==='all'||t.industry===_indFilter)
+    .forEach(([p,t])=>sel.add(new Option(t.name+' ('+t.industry+')',p)));
+}
+function buildLibrary(){
+  let ind=_indFilter;
+  let h='<b>📝 文本</b>';
+  LIB_TEXT.forEach(l=>h+=`<button class="lib-item" onclick="addLine('text','${esc(l.tmpl)}')"><span class="icon">${l.icon}</span>${l.label}</button>`);
+  h+='<b style="display:block;margin-top:10px">━ 分割线</b>';
+  LIB_HR.forEach(l=>h+=`<button class="lib-item" onclick="addLine('hr','${l.char}')"><span class="icon">${l.icon}</span>${l.label}</button>`);
+  h+='<b style="display:block;margin-top:10px">🔁 菜品循环</b>';
+  LIB_REPEAT.forEach(l=>{
+    let data=JSON.stringify({left:l.left,right:l.right,bold:l.bold}).replace(/"/g,'&quot;');
+    h+=`<button class="lib-item" onclick="addLine('repeat',null,${data})"><span class="icon">${l.icon}</span>${l.label}</button>`;
+  });
+  document.getElementById('lib_items').innerHTML=h;
+  // vars
+  let vh='';
+  ['restaurant_name','printed_at','table','id','total_amount','qty','name','item_code','price','total'].forEach(v=>{
+    vh+=`<button class="lib-item" onclick="insertVar('{{${v}}}')" style="font-size:11px;font-family:monospace">{{${v}}}</button>`;
+  });
+  document.getElementById('lib_vars').innerHTML=vh;
+  // industry snippets
+  let ih='';
+  let templates=Object.entries(_allTpls);
+  if(ind!=='all')templates=templates.filter(([p,t])=>t.industry===ind);
+  if(!templates.length){ih='<span style="color:#666;font-size:11px">选行业无模板</span>'}
+  else{
+    // group by industry
+    let byInd={};
+    templates.forEach(([p,t])=>{let cat=t.industry||'其他';(byInd[cat]=byInd[cat]||[]).push([p,t])});
+    Object.entries(byInd).forEach(([cat,items])=>{
+      ih+=`<b style="display:block;margin-top:4px;color:#e94560;font-size:11px">${cat} (${items.length})</b>`;
+      items.forEach(([p,t])=>{
+        ih+=`<button class="lib-item" onclick="loadTplByPath('${esc(p)}')"><span class="icon">📄</span>${t.name}</button>`;
+      });
+    });
+  }
+  document.getElementById('lib_industry').innerHTML=ih||'<span style="color:#666;font-size:11px">加载中...</span>';
+}
+
+// ── Line management ──
+function newTpl(){
+  _lines=[{text:'{{restaurant_name}}',align:'center',bold:true,size:'wide'},{hr:'='},{repeat:'items',left:'{{qty}}x {{name}}',right:'{{total}}',bold:true},{hr:'='},{text:'TOTAL {{total_amount}} EUR',align:'right',bold:true,size:'xl'},{text:'{{printed_at}}',align:'center'}];
+  _tplMeta={name:'',industry:'',width:48};
+  document.getElementById('tpl_info').textContent='新建模板';
+  document.getElementById('tpl_sel').value='';
+  renderAll();
+}
+async function loadSelectedTpl(){
+  let path=document.getElementById('tpl_sel').value;
+  if(!path)return;
+  try{
+    let r=await fetch(RELAY+'/api/templates/'+path+'?token=90edba8f0283b2c1');
+    let d=await r.json();
+    _lines=d.lines||[];
+    _tplMeta={name:d.name||'',industry:d.industry||'',width:d.width||48};
+    document.getElementById('tpl_info').textContent=d.name+' · '+d.industry;
+    renderAll();
+    msg('已加载: '+d.name,'ok');
+  }catch(e){msg('加载失败','err')}
+}
+async function loadTplByPath(path){
+  try{
+    let r=await fetch(RELAY+'/api/templates/'+path+'?token=90edba8f0283b2c1');
+    let d=await r.json();
+    _lines=d.lines||[];
+    _tplMeta={name:d.name||'',industry:d.industry||'',width:d.width||48};
+    document.getElementById('tpl_info').textContent=d.name+' · '+d.industry;
+    document.getElementById('tpl_sel').value=path;
+    renderAll();
+    msg('已加载: '+d.name,'ok');
+  }catch(e){msg('加载失败','err')}
+}
+function addLine(type,textVal,extra){
+  let line;
+  if(type==='text') line={text:textVal||'',align:'left',bold:false,size:''};
+  else if(type==='hr') line={hr:textVal||'='};
+  else if(type==='repeat') line=Object.assign({repeat:'items',left:'{{qty}}x {{name}}',right:'{{total}}',bold:true,size:''},extra||{});
+  _lines.push(line);
+  renderAll();
+}
+function insertVar(v){
+  // Insert into active input if focused, otherwise show hint
+  let ae=document.activeElement;
+  if(ae&&ae.tagName==='INPUT'&&ae.closest('#ticket_lines')){
+    let s=ae.selectionStart||ae.value.length;
+    ae.value=ae.value.slice(0,s)+v+ae.value.slice(s);
+    ae.focus();ae.setSelectionRange(s+v.length,s+v.length);
+    updateLineFromInput(ae);
+  }
+}
+function removeLine(i){_lines.splice(i,1);renderAll()}
+function moveLine(i,dir){
+  let j=i+dir;
+  if(j<0||j>=_lines.length)return;
+  [_lines[i],_lines[j]]=[_lines[j],_lines[i]];
+  renderAll();
+}
+function updateLineFromInput(el){
+  let row=el.closest('.ticket-line');
+  if(!row)return;
+  let i=parseInt(row.dataset.idx);
+  let line=_lines[i];
+  if(line.text!==undefined){
+    line.text=row.querySelector('.tl-content input').value;
+    // update align
+    row.querySelectorAll('.tl-meta button[data-a]').forEach(b=>{
+      if(b.classList.contains('active'))line.align=b.dataset.a;
+    });
+    line.bold=row.querySelector('.tl-meta button[data-b]')?.classList.contains('active')||false;
+    // size
+    let sizeBtn=row.querySelector('.tl-meta button[data-s].active');
+    line.size=sizeBtn?sizeBtn.dataset.s:'';
+  }else if(line.hr!==undefined){
+    line.hr=row.querySelector('.tl-content input').value||'=';
+  }else if(line.repeat!==undefined){
+    let inputs=row.querySelectorAll('.tl-content input');
+    if(inputs[0])line.left=inputs[0].value;
+    if(inputs[1])line.right=inputs[1].value;
+    line.bold=row.querySelector('.tl-meta button[data-b]')?.classList.contains('active')||false;
+    let sizeBtn=row.querySelector('.tl-meta button[data-s].active');
+    line.size=sizeBtn?sizeBtn.dataset.s:'';
+  }
+  renderPreview();
+}
+function renderAll(){
+  renderEditor();
+  renderPreview();
+}
+function renderEditor(){
+  let h='';
+  _lines.forEach((l,i)=>{
+    h+=`<div class="ticket-line" data-idx="${i}" 
+      ondragover="dragOver(event)" ondragleave="dragLeave(event)" ondrop="dragDrop(event,${i})">`;
+    h+=`<span class="line-num" draggable="true" ondragstart="dragStart(event,${i})" title="拖拽排序" style="cursor:grab;font-size:14px">⠿</span>`;
+    if(l.text!==undefined){
+      h+=`<div class="tl-content"><input value="${esc(l.text)}" oninput="updateLineFromInput(this)" onfocus="this.select()">
+        <div class="var-hint">文本 · {{变量}}可用</div></div>`;
+      h+=`<div class="tl-meta">`;
+      ['left','center','right'].forEach(a=>h+=`<button data-a="${a}" class="${l.align===a?'active':''}" onclick="toggleMeta(this,'a');updateLineFromInput(this)">${a==='left'?'⬅':a==='center'?'⬆':'➡'}</button>`);
+      h+=`<button data-b class="${l.bold?'active':''}" onclick="toggleMeta(this,'b');updateLineFromInput(this)">B</button>`;
+      ['','wide','xl'].forEach(s=>h+=`<button data-s="${s}" class="${(l.size||'')===s?'active':''}" onclick="toggleMetaSize(this,'s');updateLineFromInput(this)">${s||'1x'}</button>`);
+      h+=`</div>`;
+    }else if(l.hr!==undefined){
+      h+=`<div class="tl-content"><input value="${esc(l.hr)}" oninput="updateLineFromInput(this)" style="text-align:center"></div>`;
+      h+=`<div class="tl-meta"><span style="font-size:10px;color:#666">分割线</span></div>`;
+    }else if(l.repeat!==undefined){
+      h+=`<div class="tl-content"><input value="${esc(l.left||'')}" oninput="updateLineFromInput(this)" placeholder="左栏(菜品)">
+        <input value="${esc(l.right||'')}" oninput="updateLineFromInput(this)" placeholder="右栏(价格)"></div>`;
+      h+=`<div class="tl-meta">`;
+      h+=`<button data-b class="${l.bold?'active':''}" onclick="toggleMeta(this,'b');updateLineFromInput(this)">B</button>`;
+      ['','wide','xl'].forEach(s=>h+=`<button data-s="${s}" class="${(l.size||'')===s?'active':''}" onclick="toggleMetaSize(this,'s');updateLineFromInput(this)">${s||'1x'}</button>`);
+      h+=`<span style="font-size:10px;color:#666;margin-left:4px">🔁</span>`;
+      h+=`</div>`;
+    }
+    h+=`<div class="tl-actions">
+      <button onclick="moveLine(${i},-1)" title="上移">🔼</button>
+      <button onclick="moveLine(${i},1)" title="下移">🔽</button>
+      <button onclick="removeLine(${i})" title="删除" style="color:#e94560">✕</button></div>`;
+    h+=`</div>`;
+  });
+  document.getElementById('ticket_lines').innerHTML=h||'<div style="color:#666;text-align:center;padding:40px">票据为空 · 从左侧添加元素</div>';
+}
+function toggleMeta(btn,group){
+  if(group==='b'){btn.classList.toggle('active')}
+  else if(group==='a'){
+    btn.parentElement.querySelectorAll(`[data-a]`).forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+}
+function toggleMetaSize(btn,group){
+  btn.parentElement.querySelectorAll(`[data-s]`).forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+// ── Drag & Drop ──
+function dragStart(e,i){_dragIdx=i;e.dataTransfer.effectAllowed='move';e.target.style.opacity='.4'}
+function dragOver(e){e.preventDefault();e.target.closest('.ticket-line')?.classList.add('drag-over')}
+function dragLeave(e){e.target.closest('.ticket-line')?.classList.remove('drag-over')}
+function dragDrop(e,i){
+  e.preventDefault();
+  document.querySelectorAll('.ticket-line').forEach(el=>el.classList.remove('drag-over'));
+  if(_dragIdx===null||_dragIdx===i)return;
+  let [item]=_lines.splice(_dragIdx,1);
+  _lines.splice(i,0,item);
+  _dragIdx=null;
+  renderAll();
+}
+
+// ── Preview ──
+function renderPreview(){
+  let w=_tplMeta.width||48;
+  let charsPerLine=Math.floor(w/1.6); // rough ESC/POS width mapping
+  let html='';
+  _lines.forEach(l=>{
+    if(l.text!==undefined){
+      let txt=previewFill(l.text);
+      let cls=[];
+      if(l.align==='center')cls.push('center');
+      if(l.align==='right')cls.push('right');
+      if(l.bold)cls.push('bold');
+      if(l.size==='wide')cls.push('wide');
+      if(l.size==='xl')cls.push('xl');
+      html+=`<div class="${cls.join(' ')}">${esc(txt)}</div>`;
+    }else if(l.hr!==undefined){
+      let c=l.hr||'=';
+      html+=`<div class="hr center">${c.repeat(charsPerLine)}</div>`;
+    }else if(l.repeat!==undefined){
+      // render 2 sample items
+      ['Peking Suppe','Frühlingsrolle'].forEach((name,i)=>{
+        let qty=i+2, price=(i+1)*3.5, tot=qty*price;
+        let left=previewFill(l.left||'{{qty}}x {{name}}').replace('{{qty}}',qty).replace('{{name}}',name).replace('{{item_code}}','A'+(i+1));
+        let right=previewFill(l.right||'{{total}}').replace('{{total}}',tot.toFixed(2)).replace('{{price}}',price.toFixed(2));
+        let cls=[];
+        if(l.bold)cls.push('bold');
+        if(l.size==='wide')cls.push('wide');
+        if(l.size==='xl')cls.push('xl');
+        if(l.right){
+          // two-column
+          let pad=Math.max(2,charsPerLine-left.length-right.length);
+          html+=`<div class="${cls.join(' ')}">${esc(left)}${' '.repeat(pad)}${esc(right)}</div>`;
+        }else{
+          html+=`<div class="${cls.join(' ')}">${esc(left)}</div>`;
+        }
+      });
+    }
+  });
+  document.getElementById('preview_area').innerHTML=html||'（空模板）';
+}
+function previewFill(t){return (t||'').replace(/\{\{restaurant_name\}\}/g,'Restaurant Asia Shanghai').replace(/\{\{printed_at\}\}/g,new Date().toLocaleString('de-DE')).replace(/\{\{table\}\}/g,'5').replace(/\{\{id\}\}/g,'5881').replace(/\{\{total_amount\}\}/g,'25,50').replace(/\{\{qty\}\}/g,'2').replace(/\{\{name\}\}/g,'Test').replace(/\{\{item_code\}\}/g,'A1').replace(/\{\{price\}\}/g,'3,50').replace(/\{\{total\}\}/g,'7,00')}
+
+// ── Export ──
+function buildJSON(){
+  let obj={width:_tplMeta.width,name:_tplMeta.name||'Custom',industry:_tplMeta.industry||'General',desc:'',lines:_lines.slice()};
+  // clean empty strings
+  obj.lines.forEach(l=>{Object.keys(l).forEach(k=>{if(l[k]===''&&k!=='text'&&k!=='size')delete l[k]})});
+  return JSON.stringify(obj,null,2);
+}
+function copyJSON(){
+  let json=buildJSON();
+  navigator.clipboard.writeText(json).then(()=>msg('JSON 已复制!','ok')).catch(()=>msg('复制失败','err'));
+}
+function saveTpl(){
+  let json=buildJSON();
+  localStorage.setItem('pr_tpl_editor_saved',json);
+  msg('已保存到本地存储','ok');
+}
+function applyToRoute(){
+  let json=buildJSON();
+  if(window.opener&&window.opener._customTpl!==undefined){
+    window.opener._customTpl=json;
+    window.opener.document.getElementById('btn_edit_tpl')&&(window.opener.document.getElementById('btn_edit_tpl').style.background='#ff9800');
+    msg('已应用到路由编辑器!','ok');
+  }else{
+    copyJSON();
+    msg('JSON 已复制 · 请粘贴到路由的 ✏️ 编辑器中','ok');
+  }
+}
+function showAddMenu(){
+  // simple: add a text line
+  addLine('text','新文本');
+}
+
+function msg(t,c){
+  let el=document.getElementById('footer_msg');
+  el.textContent=t;el.className='msg '+c;
+  setTimeout(()=>{el.textContent='';el.className='msg'},3000);
+}
+function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+// Load saved
+let saved=localStorage.getItem('pr_tpl_editor_saved');
+if(saved){
+  try{let d=JSON.parse(saved);_lines=d.lines||[];_tplMeta={name:d.name||'',industry:d.industry||'',width:d.width||48}}catch(e){}
+}
+
+init();
+</script>
+</body>
+</html>
