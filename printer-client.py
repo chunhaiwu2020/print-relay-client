@@ -237,7 +237,34 @@ class Client:
                         continue
 
                     ticket_b64 = msg.get('ticket_b64', '')
+                    pdf_b64 = msg.get('pdf_b64', '')
                     target_printer = msg.get('printer', '')
+
+                    if pdf_b64:
+                        import tempfile, os as _os
+                        pdf_data = base64.b64decode(pdf_b64)
+                        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
+                            f.write(pdf_data)
+                            pdf_path = f.name
+                        try:
+                            import win32api
+                            win32api.ShellExecute(0, "print", pdf_path, None, ".", 0)
+                            ok = True
+                        except Exception as e:
+                            log.error(f'PDF print failed: {e}')
+                            ok = False
+                        # Cleanup after 10s
+                        def _clean():
+                            time.sleep(10)
+                            try: _os.unlink(pdf_path)
+                            except: pass
+                        threading.Thread(target=_clean, daemon=True).start()
+                        onum = msg.get('order_id', '?')
+                        if ok:
+                            self._state('approved', f'📄 #{onum} ({len(pdf_data)}B PDF) -> {target_printer}')
+                        else:
+                            self._state('error', f'PDF print failed #{onum} -> {target_printer}')
+                        continue
 
                     if not ticket_b64 or not target_printer:
                         continue
@@ -390,18 +417,16 @@ class App:
         self.stations = {}      # {key: {'var': tk.IntVar, 'combo': ttk.Combobox}}
         self.printers_list = []  # 缓存扫描结果
 
-        for key, label in [('kitchen', 'Kitchen'), ('cashier', 'Cashier'), ('bar', 'Bar'), ('default', 'Default')]:
+        for key, label in [('1', 'Station 1'), ('2', 'Station 2'), ('3', 'Station 3')]:
             row = tt.Frame(pf)
             row.pack(fill=t.X, pady=(0,3))
-            v = t.IntVar(value=1 if key == 'default' else 0)
+            v = t.IntVar(value=1 if key == '1' else 0)
             cb = tt.Checkbutton(row, text=label, variable=v,
                                 command=lambda k=key: self._on_check_changed(k))
             cb.pack(side=t.LEFT)
             combo = tt.Combobox(row, state='readonly', width=28)
             combo.pack(side=t.LEFT, padx=(8,0))
             self.stations[key] = {'var': v, 'combo': combo}
-            if key == 'bar':
-                combo.config(state='disabled')
 
         btn_row = tt.Frame(pf)
         btn_row.pack(fill=t.X, pady=(8,0))
@@ -465,7 +490,7 @@ class App:
         cfg = self.client.config
         if not cfg.sections():
             return
-        for key, label in [('kitchen', 'Kitchen'), ('cashier', 'Cashier'), ('bar', 'Bar'), ('default', 'Default')]:
+        for key, label in [('1', 'Station 1'), ('2', 'Station 2'), ('3', 'Station 3')]:
             sec = f'printer.{key}'
             if cfg.has_section(sec):
                 name = cfg.get(sec, 'name', fallback='')
@@ -483,7 +508,7 @@ class App:
         cfg.optionxform = str
         built = []
 
-        for key, label in [('kitchen', 'Kitchen'), ('cashier', 'Cashier'), ('bar', 'Bar'), ('default', 'Default')]:
+        for key, label in [('1', 'Station 1'), ('2', 'Station 2'), ('3', 'Station 3')]:
             st = self.stations[key]
             if not st['var'].get():
                 continue

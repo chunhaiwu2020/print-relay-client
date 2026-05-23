@@ -185,6 +185,9 @@ def _esc_size(on, s=''):
     return b'\x1d\x21\x11' if s == 'xl' else b'\x1d\x21\x10' if s == 'wide' else b''
 def _esc_size_off(): return b'\x1d\x21\x00'
 def _esc_line(text, w_mm):
+    import unicodedata
+    text = text.replace('€', 'EUR')
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
     n = int(w_mm * 1.8)
     return text.encode('latin-1', errors='replace')[:n] + b'\n'
 
@@ -228,6 +231,10 @@ def render_ticket(template, order, station_filter=None):
             out += _esc_line(txt, w)
             if sz: out += _esc_size_off()
             if bold: out += _esc_bold(False)
+    # Cut: push paper 15mm → partial cut → retract
+    out += b'\x1b\x4a\x78'     # ESC J 120 (15mm feed)
+    out += b'\x1d\x56\x01'     # GS V 1 (partial cut)
+    out += b'\x1b\x4b\x78'     # ESC K 120 (15mm reverse feed)
     return out
 
 def load_and_render(route, order):
@@ -247,6 +254,65 @@ def load_and_render(route, order):
     sf = route.get('station_filter', None)
     ticket = render_ticket(template, order, sf)
     return _b64.b64encode(ticket).decode()
+
+# ── PDF Rendering ──────────────────────────────────────────
+def _render_html_content(template, order):
+    """Render HTML template content rows into full HTML string"""
+    rows_html = []
+    for row in template.get('content', []):
+        # Support extended row format: [tag, class, text] or ["condition", key, tag, class, text]
+        if row[0] == 'condition':
+            if len(row) < 5: continue
+            cond_key, tag, cls, text = row[1], row[2], row[3], row[4]
+            if cond_key not in order or not order.get(cond_key):
+                continue
+        else:
+            tag, cls, text = row[0], row[1], row[2] if len(row) > 2 else ''
+        
+        text = _resolve_vars(text, order)
+        if tag == 'div':
+            if cls == 'hr':
+                rows_html.append('<div class="hr"></div>')
+            elif cls == 'row':
+                rows_html.append(f'<div class="row">{text}</div>')
+            else:
+                rows_html.append(f'<div class="{cls}">{text}</div>')
+    
+    tpl = template.get('html', '<html><body>%CONTENT%</body></html>')
+    return tpl.replace('%CONTENT%', '\n'.join(rows_html))
+
+def render_pdf(template, order):
+    """Convert HTML template + order data → PDF bytes"""
+    from weasyprint import HTML
+    html = _render_html_content(template, order)
+    return HTML(string=html).write_pdf(presentational_hints=True)
+
+def load_and_render_pdf(route, order):
+    """Load HTML template, render PDF, return base64"""
+    tpl_path = route.get('template', '')
+    fp = DATA_DIR / 'templates' / tpl_path
+    if not fp.is_file():
+        return None
+    template = json.loads(fp.read_text())
+    if template.get('format') != 'html':
+        return None
+    pdf = render_pdf(template, order)
+    return _b64.b64encode(pdf).decode()
+
+def load_and_render_any(route, order):
+    """Auto-detect format: PDF for 'html' templates, ESC/POS otherwise"""
+    tpl_path = route.get('template', '')
+    fp = DATA_DIR / 'templates' / tpl_path
+    if not fp.is_file():
+        return None, None
+    template = json.loads(fp.read_text())
+    if template.get('format') == 'html':
+        pdf = render_pdf(template, order)
+        return _b64.b64encode(pdf).decode(), 'pdf'
+    else:
+        sf = route.get('station_filter', None)
+        ticket = render_ticket(template, order, sf)
+        return _b64.b64encode(ticket).decode(), 'escpos'
 
 # ── i18n strings ─────────────────────────────────────────────
 T = {
@@ -1028,11 +1094,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 results = []
                 for r in matched:
                     cli = r.get('client',''); prn = r.get('printer','')
-                    ticket_b64 = load_and_render(r, order)
-                    if not ticket_b64:
+                    result = load_and_render_any(r, order)
+                    if not result or not result[0]:
                         results.append({'client':cli,'printer':prn,'ok':False,'error':'template not found'})
                         continue
-                    payload = json.dumps({"printer":prn,"ticket_b64":ticket_b64}).encode()
+                    data_b64, fmt = result
+                    payload = json.dumps({"printer":prn,"ticket_b64":data_b64} if fmt == 'escpos' else {"printer":prn,"pdf_b64":data_b64}).encode()
                     ok = run_async(send_to_client(cli, payload))
                     results.append({'client':cli,'printer':prn,'ok':ok})
                     if ok:
@@ -1049,10 +1116,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 tpl_path = body.get('_template', 'restaurant/kitchen.json')
                 tpl_override = body.get('_template_override', '')
                 route = {'template': tpl_path, 'template_override': tpl_override}
-                ticket_b64 = load_and_render(route, order)
-                if not ticket_b64:
+                result = load_and_render_any(route, order)
+                if not result or not result[0]:
                     self._json({'error':'template not found: '+tpl_path}, 404); return
-                payload = json.dumps({"printer":target_printer,"ticket_b64":ticket_b64}).encode()
+                data_b64, fmt = result
+                payload = json.dumps({"printer":target_printer,"ticket_b64":data_b64} if fmt == 'escpos' else {"printer":target_printer,"pdf_b64":data_b64}).encode()
                 ok = run_async(send_to_client(target_client, payload))
                 results = [{'client':target_client,'printer':target_printer,'ok':ok}]
                 if ok:
