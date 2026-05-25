@@ -154,15 +154,55 @@ async def send_to_client(name, data):
 # ── ESC/POS 云端渲染引擎 ─────────────────────────────────────
 import re as _re, base64 as _b64
 
+# ── QR / Image 渲染 (Pillow + qrcode) ─────────────────────────
+try:
+    import qrcode as _qrcode
+    from PIL import Image as _PILImage
+    _HAS_QR = True
+except ImportError:
+    _HAS_QR = False
+
+def _make_qr(data, w_mm=48):
+    """Generate ESC/POS GS v 0 bitmap from QR code data.
+    Returns ESC/POS bytes ready to append to ticket."""
+    if not _HAS_QR or not data:
+        return b''
+    qr = _qrcode.QRCode(version=1, box_size=3, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    target_w = int(w_mm * 8)
+    img = img.resize((target_w, target_w), _PILImage.NEAREST)
+    img = img.convert('1')
+    wb = (img.width + 7) // 8
+    h = img.height
+    raster = bytes([0x1D, 0x76, 0x30, 0x00, wb & 0xFF, (wb >> 8) & 0xFF, h & 0xFF, (h >> 8) & 0xFF])
+    px = img.load()
+    for y in range(h):
+        b = 0
+        for x in range(img.width):
+            if px[x, y] == 0:
+                b |= 1 << (7 - (x % 8))
+            if (x % 8) == 7 or x == img.width - 1:
+                raster += bytes([b])
+                b = 0
+    return raster + b'\n'
+
 VAR_MAP = {
     'restaurant_name': 'Restaurant Asia Shanghai',
+    'shop_name': lambda o: 'Restaurant Asia Shanghai',
     'id': lambda o: str(o.get('number', o.get('id', '?'))),
+    'order_id': lambda o: str(o.get('number', o.get('id', '?'))),
+    'order_time': lambda o: str(o.get('date_created', o.get('order_time', '')))[:19] if o.get('date_created') or o.get('order_time') else '',
     'table_id': lambda o: str(o.get('table_id', o.get('table', '?'))),
     'table': lambda o: str(o.get('table', o.get('table_id', '?'))),
+    'guests': lambda o: str(o.get('guests', o.get('meta_data', {}).get('guests', '?'))),
+    'waiter': lambda o: str(o.get('waiter', o.get('meta_data', {}).get('waiter', ''))),
     'printed_at': lambda o: datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
     'total_amount': lambda o: str(o.get('total', '0')),
     'qty': lambda item: str(item.get('quantity', 1)),
     'item_code': lambda item: str(item.get('sku', item.get('id', ''))),
+    'sku': lambda item: str(item.get('sku', '')),
     'name': lambda item: str(item.get('name', '')),
     'price': lambda item: str(item.get('price', '0')),
     'total': lambda item: str(item.get('total', item.get('price', '0'))),
@@ -185,9 +225,6 @@ def _esc_size(on, s=''):
     return b'\x1d\x21\x11' if s == 'xl' else b'\x1d\x21\x10' if s == 'wide' else b''
 def _esc_size_off(): return b'\x1d\x21\x00'
 def _esc_line(text, w_mm):
-    import unicodedata
-    text = text.replace('€', 'EUR')
-    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii')
     n = int(w_mm * 1.8)
     return text.encode('latin-1', errors='replace')[:n] + b'\n'
 
@@ -195,6 +232,7 @@ def render_ticket(template, order, station_filter=None):
     """JSON模板 → ESC/POS bytes"""
     w = template.get('width', 48)
     out = _esc_init()
+    cuts = template.get('cuts', {})
     items = order.get('line_items', [])
     if station_filter:
         items = [i for i in items if station_filter.lower() in i.get('name','').lower()]
@@ -221,6 +259,9 @@ def render_ticket(template, order, station_filter=None):
                     out += _esc_line(l.ljust(n - len(r)) + r, w)
                 if sz: out += _esc_size_off()
                 if bold: out += _esc_bold(False)
+                # cut after each item if configured
+                if cuts.get('after_each_item'):
+                    out += b'\x1d\x56\x01'
             continue
         if 'text' in el:
             txt = _resolve_vars(el['text'], order)
@@ -231,10 +272,15 @@ def render_ticket(template, order, station_filter=None):
             out += _esc_line(txt, w)
             if sz: out += _esc_size_off()
             if bold: out += _esc_bold(False)
-    # Cut: push paper 15mm → partial cut → retract
-    out += b'\x1b\x4a\x78'     # ESC J 120 (15mm feed)
-    out += b'\x1d\x56\x01'     # GS V 1 (partial cut)
-    out += b'\x1b\x4b\x78'     # ESC K 120 (15mm reverse feed)
+        if 'qr' in el:
+            qr_data = _resolve_vars(el['qr'], order)
+            if qr_data and qr_data != el['qr']:
+                qr_w = el.get('width', w)
+                out += _make_qr(qr_data, qr_w)
+            continue
+    # cut paper if configured
+    if cuts.get('after_footer'):
+        out += b'\x1d\x56\x01'  # GS V 1 = partial cut
     return out
 
 def load_and_render(route, order):
@@ -254,65 +300,6 @@ def load_and_render(route, order):
     sf = route.get('station_filter', None)
     ticket = render_ticket(template, order, sf)
     return _b64.b64encode(ticket).decode()
-
-# ── PDF Rendering ──────────────────────────────────────────
-def _render_html_content(template, order):
-    """Render HTML template content rows into full HTML string"""
-    rows_html = []
-    for row in template.get('content', []):
-        # Support extended row format: [tag, class, text] or ["condition", key, tag, class, text]
-        if row[0] == 'condition':
-            if len(row) < 5: continue
-            cond_key, tag, cls, text = row[1], row[2], row[3], row[4]
-            if cond_key not in order or not order.get(cond_key):
-                continue
-        else:
-            tag, cls, text = row[0], row[1], row[2] if len(row) > 2 else ''
-        
-        text = _resolve_vars(text, order)
-        if tag == 'div':
-            if cls == 'hr':
-                rows_html.append('<div class="hr"></div>')
-            elif cls == 'row':
-                rows_html.append(f'<div class="row">{text}</div>')
-            else:
-                rows_html.append(f'<div class="{cls}">{text}</div>')
-    
-    tpl = template.get('html', '<html><body>%CONTENT%</body></html>')
-    return tpl.replace('%CONTENT%', '\n'.join(rows_html))
-
-def render_pdf(template, order):
-    """Convert HTML template + order data → PDF bytes"""
-    from weasyprint import HTML
-    html = _render_html_content(template, order)
-    return HTML(string=html).write_pdf(presentational_hints=True)
-
-def load_and_render_pdf(route, order):
-    """Load HTML template, render PDF, return base64"""
-    tpl_path = route.get('template', '')
-    fp = DATA_DIR / 'templates' / tpl_path
-    if not fp.is_file():
-        return None
-    template = json.loads(fp.read_text())
-    if template.get('format') != 'html':
-        return None
-    pdf = render_pdf(template, order)
-    return _b64.b64encode(pdf).decode()
-
-def load_and_render_any(route, order):
-    """Auto-detect format: PDF for 'html' templates, ESC/POS otherwise"""
-    tpl_path = route.get('template', '')
-    fp = DATA_DIR / 'templates' / tpl_path
-    if not fp.is_file():
-        return None, None
-    template = json.loads(fp.read_text())
-    if template.get('format') == 'html':
-        pdf = render_pdf(template, order)
-        return _b64.b64encode(pdf).decode(), 'pdf'
-    else:
-        sf = route.get('station_filter', None)
-        ticket = render_ticket(template, order, sf)
-        return _b64.b64encode(ticket).decode(), 'escpos'
 
 # ── i18n strings ─────────────────────────────────────────────
 T = {
@@ -398,7 +385,10 @@ T = {
         "limit_label": "上限",
         "save": "保存",
         "updated": "✅ 已更新",
-        "no_pending": "无待审核",
+        "no_pending": "无待审核",    "contact_title": "联系我们", "contact_sub": "有问题？留下联系方式，24小时内回复。",
+        "contact_name_ph": "你的名字", "contact_email_ph": "邮箱", "contact_msg_ph": "留言...",
+        "contact_send": "✉️ 发送", "contact_sent": "✅ 已发送！", "contact_error": "❌ 发送失败",
+
     },
     "en": {
         "title": "Print Relay · Cloud Print Relay",
@@ -489,6 +479,9 @@ T = {
         "templates_all": "All",
         "edit_tpl": "✏️ Customize", "save_tpl": "💾 Save Custom", "clear_tpl": "Clear Custom", "cancel": "Cancel",
         "pick_tpl_first": "Select a template first", "tpl_customized": "Customized",
+        "contact_title": "Contact Us", "contact_sub": "Interested? Leave your details — we'll get back within 24 hours.",
+        "contact_name_ph": "Your name", "contact_email_ph": "Email", "contact_msg_ph": "Tell us about your project...",
+        "contact_send": "✉️ Send",        "contact_sent": "✅ Sent! We will be in touch.", "contact_error": "❌ Failed, please try again",
     },
     "zh": {
         "login_title": "登录", "register_title": "注册", "email_ph": "邮箱地址", "password_ph": "密码", "password_hint": "至少6位",
@@ -518,6 +511,9 @@ T = {
         "templates_apply": "应用", "templates_desc": "选择适合您行业的打印模板", "templates_all": "全部",
         "edit_tpl": "✏️ 自定义", "save_tpl": "💾 保存自定义", "clear_tpl": "清除自定义", "cancel": "取消",
         "pick_tpl_first": "请先选择模板", "tpl_customized": "已自定义",
+        "contact_title": "联系我们", "contact_sub": "有问题？留下联系方式，24小时内回复。",
+        "contact_name_ph": "你的名字", "contact_email_ph": "邮箱", "contact_msg_ph": "留言...",
+        "contact_send": "✉️ 发送", "contact_sent": "✅ 已发送！", "contact_error": "❌ 发送失败",
     }
 }
 
@@ -604,17 +600,91 @@ function setLang(l){localStorage.setItem('pr_lang',l);location.search='?lang='+l
 
 def landing_page(lang):
     t = T[lang]; css = _page_css()
+    dl = {'zh': '下载客户端', 'en': 'Download Client'}
+    doc = {'zh': 'API 文档', 'en': 'API Docs'}
+    ver = {'zh': '版本 v6 · 约 11MB · Win10/11 · 开机自启', 'en': 'v6 · ~11MB · Win10/11 · Auto-start'}
+    api_desc = {'zh': '一行 HTTP POST 即可打印，支持 WooCommerce / 自定义系统', 'en': 'One HTTP POST to print. WooCommerce / custom systems.'}
+    quick = {'zh': '快速开始', 'en': 'Quick Start'}
+    quick_desc = {'zh': '5 分钟接入你的订单系统', 'en': 'Connect your ordering system in 5 min'}
+    api_ref = {'zh': 'API 参考', 'en': 'API Reference'}
+    api_ref_desc = {'zh': '完整 HTTP API 接口文档', 'en': 'Full HTTP API reference'}
+    woo = {'zh': 'WooCommerce', 'en': 'WooCommerce'}
+    woo_desc = {'zh': 'WordPress 插件接入指南', 'en': 'WordPress plugin guide'}
     return f"""<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{t['title']}</title><style>{css}</style></head><body>
+<title>{t['title']}</title><style>{css}
+.dl-section{{text-align:center;padding:50px 24px;background:#fff;border-top:1px solid #eee}}
+.dl-section h2{{font-size:22px;margin-bottom:8px}}
+.dl-section .ver{{font-size:13px;color:#999;margin-top:12px}}
+.dl-section .btn.dl{{font-size:18px;padding:16px 48px;background:#2e7d32;color:#fff;display:inline-block;border-radius:8px;text-decoration:none;font-weight:600;margin-top:16px}}
+.dl-section .btn.dl:hover{{background:#1b5e20}}
+.docs-section{{text-align:center;padding:50px 24px;max-width:800px;margin:0 auto}}
+.docs-section h2{{font-size:22px;margin-bottom:8px}}
+.docs-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;max-width:700px;margin:20px auto}}
+.doc-card{{background:#fff;border:1px solid #e0e0e0;border-radius:10px;padding:20px;text-align:left;text-decoration:none;color:#222;transition:all .15s;display:block}}
+.doc-card:hover{{border-color:#1976d2;box-shadow:0 2px 12px rgba(25,118,210,.1)}}
+.doc-card h3{{font-size:15px;margin-bottom:4px;color:#1976d2}}
+.doc-card p{{font-size:13px;color:#666;margin:0}}
+.contact-section{{text-align:center;padding:50px 24px;max-width:600px;margin:0 auto}}
+.contact-section h2{{font-size:22px;margin-bottom:8px}}
+.contact-section .sub{{color:#888;font-size:14px;margin-bottom:24px}}
+.contact-section input,.contact-section textarea{{width:100%;padding:12px;margin-bottom:10px;border:1px solid #ddd;border-radius:8px;font-size:14px;font-family:inherit}}
+.contact-section textarea{{min-height:100px;resize:vertical}}
+.contact-section input:focus,.contact-section textarea:focus{{outline:none;border-color:#1976d2}}
+.contact-section .btn.send{{padding:14px 48px;font-size:16px;background:#1976d2;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600}}
+.contact-section .btn.send:hover{{background:#1565c0}}
+.contact-section .result{{margin-top:16px;font-size:14px;display:none}}
+.contact-section .result.show{{display:block}}
+.contact-section .result.ok{{color:#2e7d32}}
+.contact-section .result.err{{color:#c62828}}
+</style></head><body>
 <div class="header"><div class="logo">🖨️ <span>Print Relay</span></div>{_lang_nav(lang)}</div>
 <div class="hero">
 <h1>{t['hero']}</h1>
 <p>{t['sub']}</p>
-<div class="cta"><a href="/login?lang={lang}">{t['cta']}</a><a href="/login?lang={lang}" class="ghost">{t['login_btn']}</a></div>
+<div class="cta"><a href="/login?lang={lang}" class="btn primary">{t['cta']}</a><a href="/download" class="btn ghost">⬇ {dl.get(lang, dl['en'])}</a><a href="/login?lang={lang}">{t['login_btn']}</a></div>
 </div>
 <div class="features">{''.join(f'<div class="feat">{f}</div>' for f in t['features'])}</div>
+<div class="dl-section">
+<h2>⬇ {dl.get(lang, dl['en'])}</h2>
+<p>{ver.get(lang, ver['en'])}</p>
+<a href="/download" class="btn dl">📦 Print-Relay-Client.zip</a>
+</div>
+<div class="docs-section">
+<h2>📚 {doc.get(lang, doc['en'])}</h2>
+<p>{api_desc.get(lang, api_desc['en'])}</p>
+<div class="docs-grid">
+<a href="/docs" class="doc-card"><h3>🚀 {quick.get(lang, quick['en'])}</h3><p>{quick_desc.get(lang, quick_desc['en'])}</p></a>
+<a href="/docs#api" class="doc-card"><h3>📡 {api_ref.get(lang, api_ref['en'])}</h3><p>{api_ref_desc.get(lang, api_ref_desc['en'])}</p></a>
+<a href="/docs#woocommerce" class="doc-card"><h3>🛒 {woo.get(lang, woo['en'])}</h3><p>{woo_desc.get(lang, woo_desc['en'])}</p></a>
+</div>
+</div>
+<div class="contact-section">
+<h2>📮 {t['contact_title']}</h2>
+<p class="sub">{t['contact_sub']}</p>
+<input id="c_name" placeholder="{t['contact_name_ph']}">
+<input id="c_email" type="email" placeholder="{t['contact_email_ph']}">
+<textarea id="c_msg" placeholder="{t['contact_msg_ph']}"></textarea>
+<button class="btn send" onclick="sendContact()">{t['contact_send']}</button>
+<div class="result" id="c_result"></div>
+</div>
 <div class="footer">{t['footer']}</div>
 {_lang_script()}
+<script>
+async function sendContact(){{
+ let n=document.getElementById('c_name').value.trim();
+ let e=document.getElementById('c_email').value.trim();
+ let m=document.getElementById('c_msg').value.trim();
+ let r=document.getElementById('c_result');
+ if(!n||!e){{r.textContent='{t['contact_error']}';r.className='result show err';return}}
+ try{{
+  let resp=await fetch('/api/contact',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{name:n,email:e,message:m}})}});
+  let d=await resp.json();
+  r.textContent=d.ok ? '{t['contact_sent']}' : '{t['contact_error']}';
+  r.className='result show '+(d.ok?'ok':'err');
+  if(d.ok){{document.getElementById('c_name').value='';document.getElementById('c_email').value='';document.getElementById('c_msg').value=''}}
+ }}catch(x){{r.textContent='{t['contact_error']}';r.className='result show err'}}
+}}
+</script>
 </body></html>"""
 
 def login_page(lang):
@@ -994,6 +1064,31 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if path == '/editor':
             try: self._html(_load_editor_html()); return
             except: self.send_error(404); return
+        if path == '/download':
+            zip_path = DATA_DIR / 'print-relay-client.zip'
+            if zip_path.is_file():
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/zip')
+                self.send_header('Content-Disposition', 'attachment; filename="Print-Relay-Client.zip"')
+                self.send_header('Content-Length', str(zip_path.stat().st_size))
+                self.end_headers()
+                with open(zip_path, 'rb') as f:
+                    self.wfile.write(f.read())
+            else:
+                self._html('<h2>File not found</h2>', 404)
+            return
+        if path == '/docs':
+            from pathlib import Path
+            doc_path = DATA_DIR / 'template-editor.html'
+            if doc_path.is_file():
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.end_headers()
+                with open(doc_path, 'r') as f:
+                    self.wfile.write(f.read().encode())
+            else:
+                self._html('<h2>Docs coming soon</h2>', 404)
+            return
         if path == '/': self._html(landing_page(lang)); return
         if path == '/login': self._html(login_page(lang)); return
 
@@ -1094,12 +1189,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 results = []
                 for r in matched:
                     cli = r.get('client',''); prn = r.get('printer','')
-                    result = load_and_render_any(r, order)
-                    if not result or not result[0]:
+                    ticket_b64 = load_and_render(r, order)
+                    if not ticket_b64:
                         results.append({'client':cli,'printer':prn,'ok':False,'error':'template not found'})
                         continue
-                    data_b64, fmt = result
-                    payload = json.dumps({"printer":prn,"ticket_b64":data_b64} if fmt == 'escpos' else {"printer":prn,"pdf_b64":data_b64}).encode()
+                    payload = json.dumps({"printer":prn,"ticket_b64":ticket_b64}).encode()
                     ok = run_async(send_to_client(cli, payload))
                     results.append({'client':cli,'printer':prn,'ok':ok})
                     if ok:
@@ -1116,11 +1210,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 tpl_path = body.get('_template', 'restaurant/kitchen.json')
                 tpl_override = body.get('_template_override', '')
                 route = {'template': tpl_path, 'template_override': tpl_override}
-                result = load_and_render_any(route, order)
-                if not result or not result[0]:
+                ticket_b64 = load_and_render(route, order)
+                if not ticket_b64:
                     self._json({'error':'template not found: '+tpl_path}, 404); return
-                data_b64, fmt = result
-                payload = json.dumps({"printer":target_printer,"ticket_b64":data_b64} if fmt == 'escpos' else {"printer":target_printer,"pdf_b64":data_b64}).encode()
+                payload = json.dumps({"printer":target_printer,"ticket_b64":ticket_b64}).encode()
                 ok = run_async(send_to_client(target_client, payload))
                 results = [{'client':target_client,'printer':target_printer,'ok':ok}]
                 if ok:
@@ -1130,6 +1223,20 @@ class WebhookHandler(BaseHTTPRequestHandler):
                         if len(a['history']) > 50: a['history'].pop()
                 with state.lock: state.save()
                 self._json({'status':'ok','results':results}); return
+
+        if path == '/api/contact':
+            name = body.get('name',''); email = body.get('email',''); message = body.get('message','')
+            text = f"📮 *New Print Relay Inquiry*\n\n👤 *Name:* {name}\n📧 *Email:* {email}\n💬 *Message:* {message or '—'}"
+            try:
+                import urllib.request
+                req = urllib.request.Request('https://nt.30s.es/?token=8988',
+                    data=json.dumps({'text': text, 'parse_mode': 'Markdown'}).encode(),
+                    headers={'Content-Type': 'application/json'})
+                urllib.request.urlopen(req, timeout=10)
+                self._json({'ok': True})
+            except Exception as e:
+                self._json({'ok': False, 'error': str(e)})
+            return
 
         if self._is_admin(token):
             if path == '/admin/approve':
