@@ -237,13 +237,15 @@ class Client:
                         continue
 
                     ticket_b64 = msg.get('ticket_b64', '')
-                    pdf_b64 = msg.get('pdf_b64', '')
+                    pdf_b64 = msg.get('pdf_b64', '') or msg.get('png_b64', '')
                     target_printer = msg.get('printer', '')
 
                     if pdf_b64:
                         import tempfile, os as _os
                         pdf_data = base64.b64decode(pdf_b64)
-                        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
+                        # Detect PNG by magic bytes (relay PNG mode sends PNG as pdf_b64)
+                        suffix = '.png' if pdf_data[:4] == b'\x89PNG' else '.pdf'
+                        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
                             f.write(pdf_data)
                             pdf_path = f.name
                         try:
