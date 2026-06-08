@@ -677,14 +677,16 @@ def main():
         App().run()
 
 def _check_single_instance():
-    """防止同时跑多个客户端"""
-    import ctypes as _ct2
-    _ct2.windll.kernel32.CreateMutexA(None, False, b"PrintRelayClient_SingleInstance_v4")
-    if _ct2.windll.kernel32.GetLastError() == 183:
-        _ct2.windll.user32.MessageBoxA(0,
-            b"Print Relay is already running.\nPlease check the notification area.",
-            b"Print Relay", 0x40)
-        sys.exit(0)
+    """Click shortcut → kill old sleeping thread → start fresh"""
+    import subprocess, os as _os
+    exe_name = _os.path.basename(sys.executable) if getattr(sys, 'frozen', False) else _os.path.basename(sys.argv[0])
+
+    # Kill any existing instances of this EXE (except self)
+    subprocess.run(
+        f'taskkill /f /im "{exe_name}" /fi "PID ne {_os.getpid()}"',
+        shell=True, capture_output=True, timeout=5
+    )
+    time.sleep(0.5)  # Let Windows clean up old process handles
 
 def _install_autostart():
     import winreg
