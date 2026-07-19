@@ -108,6 +108,10 @@ async def handle_client(reader, writer):
             else: writer.write(b"APPROVED\n")
             await writer.drain(); p['printers']=printers; p['width_mm']=width_mm; state.save()
         async with async_lock:
+            old = clients.get(client_name)
+            if old and old.get("writer") is not writer:
+                try: old["writer"].close()
+                except Exception: pass
             clients[client_name]={"writer":writer,"token":token,"printers":printers,"width_mm":width_mm,"connected_at":datetime.now(timezone.utc).isoformat(),"account":found_account}
         log.info(f"Client online: {client_name} | {printers}")
         try:
@@ -138,7 +142,9 @@ async def handle_client(reader, writer):
         except asyncio.CancelledError: pass
         finally:
             hbt.cancel()
-            async with async_lock: clients.pop(client_name,None)
+            async with async_lock:
+                if clients.get(client_name,{}).get("writer") is writer:
+                    clients.pop(client_name,None)
             log.info(f"Client offline: {client_name}"); writer.close()
         return
     writer.write(b"UNKNOWN_CMD\n"); await writer.drain(); writer.close()
@@ -148,7 +154,9 @@ async def send_to_client(name, data):
     if not info: return False
     try: info["writer"].write(struct.pack('>I',len(data))+data); await info["writer"].drain(); return True
     except Exception:
-        async with async_lock: clients.pop(name,None)
+        async with async_lock:
+            if clients.get(name) is info:
+                clients.pop(name,None)
         return False
 
 # ── ESC/POS 云端渲染引擎 ─────────────────────────────────────

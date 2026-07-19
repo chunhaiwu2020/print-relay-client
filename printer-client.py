@@ -14,6 +14,9 @@ from pathlib import Path
 RELAY_HOST = "printrelay.es"
 RELAY_PORT = 51902
 PAPER_WIDTH = 80
+SOCKET_READ_TIMEOUT = 30
+STALE_CONNECTION_SECONDS = 90
+MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 # 配置文件均在 EXE 目录下
 _EXE_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
@@ -114,6 +117,14 @@ def send_raw(printer, data):
     except Exception as e:
         log.error(f"Print failed: {e}"); return False
 
+def enable_keepalive(sock):
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, 'SIO_KEEPALIVE_VALS'):
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 30000, 10000))
+    except Exception as e:
+        log.warning(f"Could not configure TCP keepalive: {e}")
+
 
 # ── 客户端核心 ───────────────────────────────────────────────
 class Client:
@@ -159,7 +170,8 @@ class Client:
     def _loop(self):
         while self.running:
             try: self._run()
-            except Exception as e: log.error(f"Loop error: {e}")
+            except Exception:
+                log.exception("Loop error")
             if self.running:
                 self._state('connecting', 'Reconnecting in 5s...')
                 for _ in range(5):
@@ -174,9 +186,7 @@ class Client:
         sock.connect((RELAY_HOST, RELAY_PORT))
 
         # TCP keepalive — prevent NAT timeout disconnect
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        except: pass
+        enable_keepalive(sock)
 
         # REGISTER
         sock.sendall(f"REGISTER {self.token}\n".encode())
@@ -216,19 +226,24 @@ class Client:
         # Normal mode — receive print jobs
         with self._sock_lock:
             self._sock = sock
-        sock.settimeout(60)
+        sock.settimeout(SOCKET_READ_TIMEOUT)
         printer_str = ', '.join(self.printers) if self.printers else 'None'
         self._state('approved', f'Online | Printers: {printer_str}')
+        last_rx = time.monotonic()
         try:
             while self.running:
                 try:
                     hdr = self._recv(sock, 4)
                     if not hdr: break
+                    last_rx = time.monotonic()
                     length = struct.unpack('>I', hdr)[0]
                     if length == 0: continue   # 心跳包，跳过
-                    if length > 512*1024: break
+                    if length > MAX_FRAME_BYTES:
+                        log.error(f"Frame too large: {length} bytes")
+                        break
                     data = self._recv(sock, length)
                     if not data: break
+                    last_rx = time.monotonic()
 
                     try:
                         msg = json.loads(data.decode('utf-8'))
@@ -278,8 +293,13 @@ class Client:
                     else:
                         self._state('error', f'Print failed #{onum} -> {printer}')
                 except socket.timeout:
+                    idle = time.monotonic() - last_rx
+                    if idle >= STALE_CONNECTION_SECONDS:
+                        log.warning(f"No server heartbeat for {int(idle)}s; reconnecting")
+                        break
                     continue
-                except:
+                except Exception:
+                    log.exception("Receive loop error")
                     break
         finally:
             with self._sock_lock:
