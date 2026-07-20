@@ -5,7 +5,7 @@
 
 !define APPNAME "Print Relay"
 !define COMPANYNAME "ThreePeaks"
-!define VERSION "6.0.3"
+!define VERSION "6.0.2"
 !define EXE_NAME "PrintRelay-Client.exe"
 
 Name "${APPNAME} ${VERSION}"

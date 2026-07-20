@@ -169,14 +169,9 @@ class Client:
 
     def _loop(self):
         while self.running:
-            try:
-                should_retry = self._run()
+            try: self._run()
             except Exception:
                 log.exception("Loop error")
-            else:
-                if should_retry is False:
-                    self.running = False
-                    return
             if self.running:
                 self._state('connecting', 'Reconnecting in 5s...')
                 for _ in range(5):
@@ -207,11 +202,11 @@ class Client:
         # Wait for server response
         resp = sock.recv(1024).strip()
         if resp == b'UNKNOWN_TOKEN':
-            self._state('error', f'Unknown token — add this client code in control panel: {self.token}')
-            sock.close(); return False
+            self._state('error', 'Unknown token — add this code in control panel')
+            sock.close(); return
         if resp == b'WRONG_TYPE':
-            self._state('error', f'Token is not a client type — delete it in panel and add as client: {self.token}')
-            sock.close(); return False
+            self._state('error', 'Token is not a client type')
+            sock.close(); return
 
         if resp == b'PENDING':
             self._state('pending', f'Waiting approval... Code: {self.token}')
