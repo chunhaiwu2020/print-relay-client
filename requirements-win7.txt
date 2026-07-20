@@ -1,0 +1,4 @@
+# Windows 7 legacy build dependencies.
+# Python 3.8.10 is the last CPython release line suitable for Windows 7.
+pywin32==306
+pyinstaller==5.13.2
