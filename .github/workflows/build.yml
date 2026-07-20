@@ -29,7 +29,7 @@ jobs:
     - name: Build Installer
       run: |
         & "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi
-        dir SETUP-6.0.4.exe
+        dir SETUP.exe
     
     - name: Upload EXE artifact
       uses: actions/upload-artifact@v4
@@ -40,5 +40,5 @@ jobs:
     - name: Upload Installer artifact
       uses: actions/upload-artifact@v4
       with:
-        name: PrintRelay-Setup-6.0.4
-        path: SETUP-6.0.4.exe
+        name: PrintRelay-Setup
+        path: SETUP.exe
