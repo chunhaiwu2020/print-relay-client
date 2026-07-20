@@ -31,7 +31,7 @@ jobs:
     - name: Build Win7 Installer
       run: |
         & "C:\Program Files (x86)\NSIS\makensis.exe" installer-win7.nsi
-        dir SETUP-Win7-6.0.3.exe
+        dir SETUP-Win7-6.0.4.exe
 
     - name: Upload Win7 EXE artifact
       uses: actions/upload-artifact@v4
@@ -42,5 +42,5 @@ jobs:
     - name: Upload Win7 Installer artifact
       uses: actions/upload-artifact@v4
       with:
-        name: PrintRelay-Setup-Win7-6.0.3
-        path: SETUP-Win7-6.0.3.exe
+        name: PrintRelay-Setup-Win7-6.0.4
+        path: SETUP-Win7-6.0.4.exe

@@ -4,7 +4,7 @@
 
 !define APPNAME "Print Relay Win7"
 !define COMPANYNAME "ThreePeaks"
-!define VERSION "6.0.3"
+!define VERSION "6.0.4"
 !define EXE_NAME "PrintRelay-Client-Win7.exe"
 
 Name "${APPNAME} ${VERSION}"
@@ -41,12 +41,22 @@ Section "Install"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayVersion" "${VERSION}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "Publisher" "${COMPANYNAME}"
 
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "PrintRelayWin7" '"$INSTDIR\${EXE_NAME}" --startup'
+    ClearErrors
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "PrintRelayWin7" '"$INSTDIR\${EXE_NAME}" --startup'
+    IfErrors 0 +3
+        MessageBox MB_ICONEXCLAMATION "Startup registry write failed. Please run installer as administrator."
+        Goto +6
+    ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "PrintRelayWin7"
+    StrCmp $0 '"$INSTDIR\${EXE_NAME}" --startup' +3 0
+        MessageBox MB_ICONEXCLAMATION "Startup registry verification failed."
+        Goto +2
+    DetailPrint "Startup registered: $0"
 
     ExecShell "" "$INSTDIR\${EXE_NAME}"
 SectionEnd
 
 Section "Uninstall"
+    DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "PrintRelayWin7"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "PrintRelayWin7"
     Delete "$INSTDIR\${EXE_NAME}"
     Delete "$INSTDIR\config.ini"
